@@ -53,7 +53,9 @@ from skygent.core.models import ForecastSnapshot, MonitoringProfile, VariableCha
 logger = logging.getLogger(__name__)
 
 # Variables that use categorical codes and must not be diff'd numerically.
-CATEGORICAL_VARIABLES = {"weathercode"}
+# Uses the Open-Meteo API variable name directly so the filter matches
+# profile.variables, which also uses the API name.
+CATEGORICAL_VARIABLES = {"weather_code"}
 
 
 @dataclass
@@ -149,7 +151,7 @@ class DiffAnalyzer:
                 "delta_pct":  <relative change %> or None if from_value == 0,
             }
         Only variables present in BOTH snapshots are included.
-        Categorical variables (weathercode) are always skipped — they are
+        Categorical variables (weather_code) are always skipped — they are
         evaluated via severity rank in significance.py.
 
         Raises
@@ -241,11 +243,11 @@ class DiffAnalyzer:
         current: ForecastSnapshot,
     ) -> None:
         """
-        Log a weathercode transition without attempting numeric diff.
-        The significance evaluator handles weathercode via severity ranks.
+        Log a weather_code transition without attempting numeric diff.
+        The significance evaluator handles weather_code via severity ranks.
         """
-        prev_code = previous.data.get("weathercode")
-        curr_code = current.data.get("weathercode")
+        prev_code = previous.data.get("weather_code")
+        curr_code = current.data.get("weather_code")
 
         if prev_code is not None and curr_code is not None:
             if prev_code != curr_code:

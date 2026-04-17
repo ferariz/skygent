@@ -70,15 +70,15 @@ PROFILE = make_profile()
 PREVIOUS_DATA = {
     "precipitation_probability_max": 10.0,
     "temperature_2m_max": 28.0,
-    "windspeed_10m_max": 20.0,
-    "weathercode": 1,
+    "wind_speed_10m_max": 20.0,
+    "weather_code": 1,
 }
 
 CURRENT_DATA = {
     "precipitation_probability_max": 55.0,  # +45 pp — above threshold
     "temperature_2m_max": 30.0,             # +2 °C  — below threshold
-    "windspeed_10m_max": 40.0,              # +20 km/h — above threshold
-    "weathercode": 63,                      # categorical — excluded from numeric diff
+    "wind_speed_10m_max": 40.0,              # +20 km/h — above threshold
+    "weather_code": 63,                      # categorical — excluded from numeric diff
 }
 
 
@@ -109,8 +109,8 @@ class TestComputeDelta:
         assert vd.delta_pct is None
 
     def test_all_fields_populated(self):
-        vd = compute_delta("windspeed_10m_max", 10.0, 25.0)
-        assert vd.variable == "windspeed_10m_max"
+        vd = compute_delta("wind_speed_10m_max", 10.0, 25.0)
+        assert vd.variable == "wind_speed_10m_max"
         assert vd.from_value == pytest.approx(10.0)
         assert vd.to_value == pytest.approx(25.0)
         assert vd.delta == pytest.approx(15.0)
@@ -127,16 +127,16 @@ class TestDiffAnalyzerCompare:
         self.previous = make_snapshot(PROFILE.id, PREVIOUS_DATA)
         self.current = make_snapshot(PROFILE.id, CURRENT_DATA)
 
-    def test_weathercode_excluded_numeric_variables_included(self):
+    def test_weather_code_excluded_numeric_variables_included(self):
         """
-        weathercode is categorical and must never appear in the output.
+        weather_code is categorical and must never appear in the output.
         All other profile variables must be present.
         """
         changes = self.analyzer.compare(self.previous, self.current, PROFILE)
-        assert "weathercode" not in changes
+        assert "weather_code" not in changes
         assert "precipitation_probability_max" in changes
         assert "temperature_2m_max" in changes
-        assert "windspeed_10m_max" in changes
+        assert "wind_speed_10m_max" in changes
 
     def test_precipitation_delta_values(self):
         changes = self.analyzer.compare(self.previous, self.current, PROFILE)
@@ -152,14 +152,14 @@ class TestDiffAnalyzerCompare:
 
     def test_wind_delta_value(self):
         changes = self.analyzer.compare(self.previous, self.current, PROFILE)
-        assert changes["windspeed_10m_max"]["delta"] == pytest.approx(20.0)
+        assert changes["wind_speed_10m_max"]["delta"] == pytest.approx(20.0)
 
     def test_identical_snapshots_produce_zero_deltas(self):
         """No change between snapshots → every delta is zero."""
         data = {
             "precipitation_probability_max": 20.0,
             "temperature_2m_max": 25.0,
-            "windspeed_10m_max": 15.0,
+            "wind_speed_10m_max": 15.0,
         }
         prev = make_snapshot(PROFILE.id, data)
         curr = make_snapshot(PROFILE.id, data.copy())
@@ -178,7 +178,7 @@ class TestDiffAnalyzerCompare:
         changes = self.analyzer.compare(prev, curr, profile_no_thresholds)
         assert "precipitation_probability_max" in changes
         assert "temperature_2m_max" in changes
-        assert "windspeed_10m_max" in changes
+        assert "wind_speed_10m_max" in changes
 
 
 # ---------------------------------------------------------------------------
@@ -199,13 +199,13 @@ class TestDiffAnalyzerMissingAndNoneValues:
     def test_key_absent_from_previous_snapshot_is_skipped(self):
         prev = make_snapshot(PROFILE.id, {
             "temperature_2m_max": 28.0,
-            "windspeed_10m_max": 20.0,
+            "wind_speed_10m_max": 20.0,
             # precipitation_probability_max intentionally absent
         })
         curr = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": 50.0,
             "temperature_2m_max": 30.0,
-            "windspeed_10m_max": 25.0,
+            "wind_speed_10m_max": 25.0,
         })
         changes = self.analyzer.compare(prev, curr, PROFILE)
         assert "precipitation_probability_max" not in changes
@@ -215,12 +215,12 @@ class TestDiffAnalyzerMissingAndNoneValues:
         prev = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": 10.0,
             "temperature_2m_max": 28.0,
-            "windspeed_10m_max": 20.0,
+            "wind_speed_10m_max": 20.0,
         })
         curr = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": 50.0,
             # temperature_2m_max intentionally absent
-            "windspeed_10m_max": 25.0,
+            "wind_speed_10m_max": 25.0,
         })
         changes = self.analyzer.compare(prev, curr, PROFILE)
         assert "temperature_2m_max" not in changes
@@ -235,12 +235,12 @@ class TestDiffAnalyzerMissingAndNoneValues:
         prev = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": None,  # sparse-location null
             "temperature_2m_max": 28.0,
-            "windspeed_10m_max": 20.0,
+            "wind_speed_10m_max": 20.0,
         })
         curr = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": 40.0,
             "temperature_2m_max": 30.0,
-            "windspeed_10m_max": 25.0,
+            "wind_speed_10m_max": 25.0,
         })
         changes = self.analyzer.compare(prev, curr, PROFILE)
         assert "precipitation_probability_max" not in changes
@@ -251,12 +251,12 @@ class TestDiffAnalyzerMissingAndNoneValues:
         prev = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": 10.0,
             "temperature_2m_max": 28.0,
-            "windspeed_10m_max": 20.0,
+            "wind_speed_10m_max": 20.0,
         })
         curr = make_snapshot(PROFILE.id, {
             "precipitation_probability_max": None,  # sparse-location null
             "temperature_2m_max": 30.0,
-            "windspeed_10m_max": 25.0,
+            "wind_speed_10m_max": 25.0,
         })
         changes = self.analyzer.compare(prev, curr, PROFILE)
         assert "precipitation_probability_max" not in changes

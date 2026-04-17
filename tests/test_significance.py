@@ -163,8 +163,8 @@ class TestIsSignificantNumeric:
             "from_value": 10, "to_value": 55, "delta": 45, "delta_pct": 450,
         }}
         prev, curr = self._make_snapshots(
-            {"precipitation_probability_max": 10, "weathercode": 1},
-            {"precipitation_probability_max": 55, "weathercode": 1},
+            {"precipitation_probability_max": 10, "weather_code": 1},
+            {"precipitation_probability_max": 55, "weather_code": 1},
         )
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
@@ -176,8 +176,8 @@ class TestIsSignificantNumeric:
             "from_value": 10, "to_value": 20, "delta": 10, "delta_pct": 100,
         }}
         prev, curr = self._make_snapshots(
-            {"precipitation_probability_max": 10, "weathercode": 1},
-            {"precipitation_probability_max": 20, "weathercode": 1},
+            {"precipitation_probability_max": 10, "weather_code": 1},
+            {"precipitation_probability_max": 20, "weather_code": 1},
         )
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is False
@@ -189,8 +189,8 @@ class TestIsSignificantNumeric:
             "from_value": 10, "to_value": 30, "delta": 20, "delta_pct": 200,
         }}
         prev, curr = self._make_snapshots(
-            {"precipitation_probability_max": 10, "weathercode": 1},
-            {"precipitation_probability_max": 30, "weathercode": 1},
+            {"precipitation_probability_max": 10, "weather_code": 1},
+            {"precipitation_probability_max": 30, "weather_code": 1},
         )
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
@@ -202,8 +202,8 @@ class TestIsSignificantNumeric:
             "from_value": 60, "to_value": 35, "delta": -25, "delta_pct": -41.6,
         }}
         prev, curr = self._make_snapshots(
-            {"precipitation_probability_max": 60, "weathercode": 1},
-            {"precipitation_probability_max": 35, "weathercode": 1},
+            {"precipitation_probability_max": 60, "weather_code": 1},
+            {"precipitation_probability_max": 35, "weather_code": 1},
         )
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
@@ -214,7 +214,7 @@ class TestIsSignificantNumeric:
         changes = {"some_unlisted_variable": {
             "from_value": 0, "to_value": 9999, "delta": 9999, "delta_pct": None,
         }}
-        prev, curr = self._make_snapshots({"weathercode": 1}, {"weathercode": 1})
+        prev, curr = self._make_snapshots({"weather_code": 1}, {"weather_code": 1})
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is False
 
@@ -223,18 +223,18 @@ class TestIsSignificantNumeric:
             "precipitation_probability_max": {
                 "from_value": 10, "to_value": 55, "delta": 45, "delta_pct": 450,
             },
-            "windspeed_10m_max": {
+            "wind_speed_10m_max": {
                 "from_value": 15, "to_value": 40, "delta": 25, "delta_pct": 166,
             },
         }
         prev, curr = self._make_snapshots(
-            {"precipitation_probability_max": 10, "windspeed_10m_max": 15, "weathercode": 1},
-            {"precipitation_probability_max": 55, "windspeed_10m_max": 40, "weathercode": 1},
+            {"precipitation_probability_max": 10, "wind_speed_10m_max": 15, "weather_code": 1},
+            {"precipitation_probability_max": 55, "wind_speed_10m_max": 40, "weather_code": 1},
         )
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
         assert "precipitation_probability_max" in triggers
-        assert "windspeed_10m_max" in triggers
+        assert "wind_speed_10m_max" in triggers
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +255,11 @@ class TestIsSignificantWeathercode:
         assert weathercode_rank(to_code) - weathercode_rank(from_code) >= 2
 
         changes = {}
-        prev = make_snapshot(PROFILE.id, {"weathercode": from_code}, horizon_days=5.0)
-        curr = make_snapshot(PROFILE.id, {"weathercode": to_code}, horizon_days=5.0)
+        prev = make_snapshot(PROFILE.id, {"weather_code": from_code}, horizon_days=5.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": to_code}, horizon_days=5.0)
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
-        assert "weathercode" in triggers
+        assert "weather_code" in triggers
 
     def test_zero_rank_jump_does_not_trigger(self):
         """
@@ -273,16 +273,16 @@ class TestIsSignificantWeathercode:
             "Update the test to use two codes that share a rank."
         )
         changes = {}
-        prev = make_snapshot(PROFILE.id, {"weathercode": from_code}, horizon_days=5.0)
-        curr = make_snapshot(PROFILE.id, {"weathercode": to_code}, horizon_days=5.0)
+        prev = make_snapshot(PROFILE.id, {"weather_code": from_code}, horizon_days=5.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": to_code}, horizon_days=5.0)
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is False
 
     def test_same_weathercode_does_not_trigger(self):
         """Identical codes → rank delta 0 → no alert."""
         changes = {}
-        prev = make_snapshot(PROFILE.id, {"weathercode": 63}, horizon_days=5.0)
-        curr = make_snapshot(PROFILE.id, {"weathercode": 63}, horizon_days=5.0)
+        prev = make_snapshot(PROFILE.id, {"weather_code": 63}, horizon_days=5.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": 63}, horizon_days=5.0)
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is False
 
@@ -293,8 +293,8 @@ class TestIsSignificantWeathercode:
         assert weathercode_rank(to_code) - weathercode_rank(from_code) == 1
 
         changes = {}
-        prev = make_snapshot(PROFILE.id, {"weathercode": from_code}, horizon_days=5.0)
-        curr = make_snapshot(PROFILE.id, {"weathercode": to_code}, horizon_days=5.0)
+        prev = make_snapshot(PROFILE.id, {"weather_code": from_code}, horizon_days=5.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": to_code}, horizon_days=5.0)
         significant, triggers = evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
 
@@ -307,7 +307,7 @@ class TestIsSignificantWeathercode:
         prev = make_snapshot(PROFILE.id, {"temperature_2m_max": 28.0}, horizon_days=5.0)
         curr = make_snapshot(PROFILE.id, {"temperature_2m_max": 30.0}, horizon_days=5.0)
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
-        assert "weathercode" not in triggers
+        assert "weather_code" not in triggers
 
     def test_large_improving_rank_jump_triggers(self):
         """
@@ -322,11 +322,11 @@ class TestIsSignificantWeathercode:
         assert abs(weathercode_rank(to_code) - weathercode_rank(from_code)) >= 2
 
         changes = {}
-        prev = make_snapshot(PROFILE.id, {"weathercode": from_code}, horizon_days=5.0)
-        curr = make_snapshot(PROFILE.id, {"weathercode": to_code}, horizon_days=5.0)
+        prev = make_snapshot(PROFILE.id, {"weather_code": from_code}, horizon_days=5.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": to_code}, horizon_days=5.0)
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is True
-        assert "weathercode" in triggers
+        assert "weather_code" in triggers
 
     def test_minor_improving_rank_jump_does_not_trigger(self):
         """
@@ -338,8 +338,8 @@ class TestIsSignificantWeathercode:
         assert abs(weathercode_rank(to_code) - weathercode_rank(from_code)) == 1
 
         changes = {}
-        prev = make_snapshot(PROFILE.id, {"weathercode": from_code}, horizon_days=5.0)
-        curr = make_snapshot(PROFILE.id, {"weathercode": to_code}, horizon_days=5.0)
+        prev = make_snapshot(PROFILE.id, {"weather_code": from_code}, horizon_days=5.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": to_code}, horizon_days=5.0)
         significant, triggers = self.evaluator.is_significant(changes, PROFILE, curr, prev)
         assert significant is False
 
@@ -351,10 +351,10 @@ class TestIsSignificantWeathercode:
 class TestBuildAlert:
     def setup_method(self):
         self.evaluator = SignificanceEvaluator()
-        self.prev = make_snapshot(PROFILE.id, {"weathercode": 1}, horizon_days=5.0)
+        self.prev = make_snapshot(PROFILE.id, {"weather_code": 1}, horizon_days=5.0)
 
     def test_ids_wired_correctly(self):
-        curr = make_snapshot(PROFILE.id, {"weathercode": 63}, horizon_days=2.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": 63}, horizon_days=2.0)
         changes = {"precipitation_probability_max": {
             "from_value": 10, "to_value": 60, "delta": 50, "delta_pct": 500,
         }}
@@ -366,7 +366,7 @@ class TestBuildAlert:
 
     def test_changes_dict_passed_through_unchanged(self):
         """build_alert must not transform or filter the changes dict."""
-        curr = make_snapshot(PROFILE.id, {"weathercode": 63}, horizon_days=2.0)
+        curr = make_snapshot(PROFILE.id, {"weather_code": 63}, horizon_days=2.0)
         changes = {"precipitation_probability_max": {
             "from_value": 10, "to_value": 60, "delta": 50, "delta_pct": 500,
         }}
@@ -375,7 +375,7 @@ class TestBuildAlert:
 
     def test_horizon_days_taken_from_current_snapshot(self):
         """horizon_days on the alert must match the current snapshot, not previous."""
-        curr = make_snapshot(PROFILE.id, {"weathercode": 63}, horizon_days=2.5)
+        curr = make_snapshot(PROFILE.id, {"weather_code": 63}, horizon_days=2.5)
         alert = self.evaluator.build_alert(PROFILE, self.prev, curr, {})
         assert alert.horizon_days == pytest.approx(2.5)
 

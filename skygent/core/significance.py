@@ -43,7 +43,7 @@ C. Weathercode direction — explicit product decision: previously only
    thunderstorm forecast and received an "actually it's clear now" alert
    has just as much reason to act (uncancel the outdoor ceremony, adjust
    logistics) as one receiving bad news. The trigger variable name is still
-   "weathercode" regardless of direction; the narrator receives the full
+   "weather_code" regardless of direction; the narrator receives the full
    change detail and can frame the message accordingly.
 
 D. Negative horizon guard: horizon_to_confidence previously accepted
@@ -218,7 +218,7 @@ class SignificanceEvaluator:
                      rank threshold.
 
         triggering_variables: list of variable names that fired, including
-                     "weathercode" when applicable. Empty list when not
+                     "weather_code" when applicable. Empty list when not
                      significant.
 
         Notes
@@ -249,8 +249,8 @@ class SignificanceEvaluator:
                 triggers.append(variable)
 
         # --- Weathercode categorical change (both directions) ---
-        prev_code = previous_snapshot.data.get("weathercode")
-        curr_code = current_snapshot.data.get("weathercode")
+        prev_code = previous_snapshot.data.get("weather_code")
+        curr_code = current_snapshot.data.get("weather_code")
 
         if prev_code is not None and curr_code is not None:
             prev_rank = weathercode_rank(int(prev_code))
@@ -267,7 +267,7 @@ class SignificanceEvaluator:
                     curr_code, curr_rank,
                     abs_rank_delta,
                 )
-                triggers.append("weathercode")
+                triggers.append("weather_code")
 
         significant = len(triggers) > 0
         return significant, triggers
