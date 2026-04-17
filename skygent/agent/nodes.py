@@ -79,6 +79,7 @@ from skygent.core.diff import DiffAnalyzer
 from skygent.core.models import Alert
 from skygent.core.significance import SignificanceEvaluator
 from skygent.integrations.openmeteo import OpenMeteoError, fetch_forecast
+from skygent.integrations.telegram import TelegramError, send_alert
 
 logger = logging.getLogger(__name__)
 
@@ -378,9 +379,10 @@ async def notify_node(state: AgentState) -> dict:
     """
     Deliver the alert to the configured notification channel.
 
-    Currently a structured log stub — Telegram delivery will be wired in
-    when telegram.py is implemented (Step 6). The node interface is final;
-    only the delivery implementation changes.
+    Routes to the appropriate delivery function based on
+    profile.notification_channel. Currently supports "telegram".
+    Adding new channels means adding a branch here — the node
+    interface and the rest of the graph are unchanged.
 
     Returns partial state: {alert} with sent=True on success,
                            or {error} on failure.
@@ -399,17 +401,28 @@ async def notify_node(state: AgentState) -> dict:
         alert.id, profile.name, profile.notification_channel,
     )
 
-    # ── Delivery stub — replace with telegram.py call in Step 6 ─────────────
-    logger.info(
-        "\n%s\n[ALERT — %s]\n%s\nConfidence: %s | Horizon: %.1f days\n%s\n",
-        "=" * 60,
-        profile.name,
-        alert.narrative,
-        alert.confidence,
-        alert.horizon_days,
-        "=" * 60,
-    )
-    # ── End stub ─────────────────────────────────────────────────────────────
+    try:
+        if profile.notification_channel == "telegram":
+            await send_alert(alert, profile)
+        else:
+            # Unknown channel — log and mark sent so the pipeline does not stall.
+            # Add new channel handlers here as the system grows.
+            logger.warning(
+                "notify: unknown channel '%s' for profile '%s' — "
+                "logging alert and marking as sent",
+                profile.notification_channel, profile.name,
+            )
+            logger.info(
+                "\n%s\n[ALERT — %s]\n%s\nConfidence: %s | Horizon: %.1f days\n%s\n",
+                "=" * 60, profile.name, alert.narrative,
+                alert.confidence, alert.horizon_days, "=" * 60,
+            )
+    except TelegramError as exc:
+        logger.error("notify: Telegram delivery failed for '%s': %s", profile.name, exc)
+        return {"error": f"notify Telegram error: {exc}"}
+    except Exception as exc:
+        logger.error("notify: unexpected error for '%s': %s", profile.name, exc)
+        return {"error": f"notify unexpected error: {exc}"}
 
     alert_sent = alert.model_copy(update={"sent": True})
     logger.info("notify: alert %s marked as sent", alert.id)
