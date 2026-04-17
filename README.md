@@ -145,3 +145,9 @@ Architecture decisions, tradeoffs, and the rationale behind non-obvious choices 
 ## Vertical extensibility
 
 `MonitoringProfile` has a `context` field (`social_event` | `agriculture` | `energy` | `logistics`) and fully configurable per-variable thresholds. The same agent can monitor soil moisture thresholds for a farm or wind speed limits for a wind farm without code changes — only the profile configuration differs.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE)

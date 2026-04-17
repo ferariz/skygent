@@ -96,8 +96,28 @@ class SnapshotStore:
         return list(self._store.keys())
 
 
-# Module-level store — shared across all jobs
+# Module-level store — shared across all jobs.
+# Use set_snapshot_store() to replace it (e.g. with DBSnapshotStore at startup)
+# rather than mutating _snapshot_store directly from outside this module.
 _snapshot_store = SnapshotStore()
+
+
+def set_snapshot_store(store: SnapshotStore) -> None:
+    """
+    Replace the module-level snapshot store.
+
+    Called at application startup to swap the in-memory SnapshotStore for
+    a DBSnapshotStore. Using an explicit setter decouples callers from the
+    private attribute name and makes the injection point visible in the
+    module's public API.
+
+    Parameters
+    ----------
+    store: any object implementing the SnapshotStore get/set/clear interface
+    """
+    global _snapshot_store
+    _snapshot_store = store
+    logger.info("scheduler: snapshot store replaced with %s", type(store).__name__)
 
 
 # ---------------------------------------------------------------------------

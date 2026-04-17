@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from skygent.core.models import ForecastSnapshot, MonitoringProfile
 from skygent.scheduler.jobs import (
+    set_snapshot_store,
     SnapshotStore,
     _job_for_profile,
     _job_id,
@@ -42,8 +43,26 @@ from skygent.scheduler.jobs import (
     shutdown,
     start,
     _scheduler,
-    _snapshot_store,
 )
+
+
+# ---------------------------------------------------------------------------
+# Module-level store reset
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def reset_snapshot_store():
+    """
+    Reset the scheduler's snapshot store to a fresh in-memory SnapshotStore
+    before each test. Guards against contamination from test_api.py's client
+    fixture which calls set_snapshot_store(DBSnapshotStore()) via the
+    lifespan, potentially leaving a DB-backed store in the module global.
+    """
+    import skygent.scheduler.jobs as jobs_module
+    original = jobs_module._snapshot_store
+    jobs_module._snapshot_store = SnapshotStore()
+    yield
+    jobs_module._snapshot_store = original
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +230,12 @@ class TestDeregisterProfile:
     def setup_method(self):
         for job in _scheduler.get_jobs():
             _scheduler.remove_job(job.id)
-        _snapshot_store._store.clear()
+        get_snapshot_store()._store.clear()
 
     def teardown_method(self):
         for job in _scheduler.get_jobs():
             _scheduler.remove_job(job.id)
-        _snapshot_store._store.clear()
+        get_snapshot_store()._store.clear()
 
     def test_deregister_removes_job(self):
         profile = make_profile()
@@ -229,11 +248,11 @@ class TestDeregisterProfile:
     def test_deregister_clears_snapshot(self):
         profile = make_profile()
         snapshot = make_snapshot(profile.id)
-        _snapshot_store.set(snapshot)
-        assert _snapshot_store.get(profile.id) is not None
+        get_snapshot_store().set(snapshot)
+        assert get_snapshot_store().get(profile.id) is not None
 
         deregister_profile(profile.id)
-        assert _snapshot_store.get(profile.id) is None
+        assert get_snapshot_store().get(profile.id) is None
 
     def test_deregister_unknown_profile_does_not_raise(self):
         deregister_profile("never-registered-id")  # must not raise
@@ -279,12 +298,12 @@ class TestListJobs:
 @pytest.mark.asyncio
 class TestJobForProfile:
     def setup_method(self):
-        _snapshot_store._store.clear()
+        get_snapshot_store()._store.clear()
         for job in _scheduler.get_jobs():
             _scheduler.remove_job(job.id)
 
     def teardown_method(self):
-        _snapshot_store._store.clear()
+        get_snapshot_store()._store.clear()
         for job in _scheduler.get_jobs():
             _scheduler.remove_job(job.id)
 
@@ -297,7 +316,7 @@ class TestJobForProfile:
                    new=AsyncMock(return_value=final)):
             await _job_for_profile(profile)
 
-        stored = _snapshot_store.get(profile.id)
+        stored = get_snapshot_store().get(profile.id)
         assert stored is not None
         assert stored.profile_id == profile.id
 
@@ -310,7 +329,7 @@ class TestJobForProfile:
                    new=AsyncMock(return_value=final)):
             await _job_for_profile(profile)
 
-        assert _snapshot_store.get(profile.id) is not None
+        assert get_snapshot_store().get(profile.id) is not None
 
     async def test_no_significant_change_stores_snapshot(self):
         """No change: snapshot still stored for next diff comparison."""
@@ -321,7 +340,7 @@ class TestJobForProfile:
                    new=AsyncMock(return_value=final)):
             await _job_for_profile(profile)
 
-        assert _snapshot_store.get(profile.id) is not None
+        assert get_snapshot_store().get(profile.id) is not None
 
     async def test_error_in_state_does_not_raise(self):
         """run_agent returning an error state must not raise from the job."""
@@ -350,8 +369,8 @@ class TestJobForProfile:
         assert _scheduler.get_job(_job_id(profile.id)) is not None
 
         # Pre-populate snapshot store to verify it gets cleared
-        _snapshot_store.set(make_snapshot(profile.id))
-        assert _snapshot_store.get(profile.id) is not None
+        get_snapshot_store().set(make_snapshot(profile.id))
+        assert get_snapshot_store().get(profile.id) is not None
 
         # Simulate profile expiring between registration and job run
         expired = profile.model_copy(update={
@@ -364,13 +383,13 @@ class TestJobForProfile:
             mock_run.assert_not_called()  # agent must not run for expired profile
 
         assert _scheduler.get_job(_job_id(profile.id)) is None
-        assert _snapshot_store.get(profile.id) is None  # snapshot cleared
+        assert get_snapshot_store().get(profile.id) is None  # snapshot cleared
 
     async def test_previous_snapshot_passed_to_agent(self):
         """The stored snapshot from the previous run is passed to run_agent."""
         profile = make_profile()
         prev_snapshot = make_snapshot(profile.id)
-        _snapshot_store.set(prev_snapshot)
+        get_snapshot_store().set(prev_snapshot)
 
         final = make_final_state(profile, significant=False)
         mock_run = AsyncMock(return_value=final)
@@ -385,7 +404,7 @@ class TestJobForProfile:
         """Each run replaces the stored snapshot with the new current one."""
         profile = make_profile()
         old_snapshot = make_snapshot(profile.id)
-        _snapshot_store.set(old_snapshot)
+        get_snapshot_store().set(old_snapshot)
 
         final = make_final_state(profile, significant=False)
         new_snapshot = final["current_snapshot"]
@@ -394,7 +413,7 @@ class TestJobForProfile:
                    new=AsyncMock(return_value=final)):
             await _job_for_profile(profile)
 
-        stored = _snapshot_store.get(profile.id)
+        stored = get_snapshot_store().get(profile.id)
         assert stored is new_snapshot
         assert stored is not old_snapshot
 
@@ -428,7 +447,24 @@ class TestSchedulerLifecycle:
 
 # Intentionally outside TestSchedulerLifecycle — that class is marked
 # @pytest.mark.asyncio which would cause a warning on a sync test method.
-def test_get_snapshot_store_returns_module_store():
-    """get_snapshot_store() returns the shared module-level instance."""
+def test_get_snapshot_store_returns_a_store_instance():
+    """get_snapshot_store() returns a SnapshotStore instance."""
     store = get_snapshot_store()
-    assert store is _snapshot_store
+    assert isinstance(store, SnapshotStore)
+    assert store is get_snapshot_store()  # same object on repeated calls
+
+
+def test_set_snapshot_store_replaces_module_store():
+    """
+    set_snapshot_store() must replace the module-level store and be
+    retrievable via get_snapshot_store(). Verifies the public setter
+    added to decouple main.py from _snapshot_store attribute mutation.
+    """
+    import skygent.scheduler.jobs as jobs_module
+    original = jobs_module._snapshot_store
+    try:
+        new_store = SnapshotStore()
+        set_snapshot_store(new_store)
+        assert get_snapshot_store() is new_store
+    finally:
+        jobs_module._snapshot_store = original  # restore for test isolation
