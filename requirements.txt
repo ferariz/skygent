@@ -21,3 +21,6 @@ sqlalchemy>=2.0
 pytest
 pytest-asyncio
 httpx   # also used by TestClient
+
+# Dashboard
+streamlit>=1.30
