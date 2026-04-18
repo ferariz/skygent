@@ -534,11 +534,11 @@ class TestLazyLLMInit:
 
     def test_get_llm_creates_and_caches_instance(self):
         """
-        _get_llm() must construct ChatAnthropic exactly once and return the
+        _get_llm() must construct ChatOpenAI exactly once and return the
         same instance on subsequent calls (singleton cache).
         """
         from skygent.agent.nodes import _get_llm
-        with patch("skygent.agent.nodes.ChatAnthropic") as mock_cls:
+        with patch("skygent.agent.nodes.ChatOpenAI") as mock_cls:
             mock_cls.return_value = MagicMock()
             import skygent.agent.nodes as nodes_module
             nodes_module._llm_instance = None  # reset for test isolation
@@ -670,8 +670,8 @@ class TestAgentIntegration:
         agent — real LLM generates the narrative.
         """
         import os
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            pytest.skip("ANTHROPIC_API_KEY not set")
+        if not os.environ.get("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
 
         prev = make_snapshot(PROFILE.id, horizon_days=5.0)
         curr_data = {**prev.data, "precipitation_probability_max": 75.0}
