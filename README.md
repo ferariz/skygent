@@ -24,7 +24,7 @@ The core design principle is **hybrid intelligence**: deterministic code makes a
 
 | Component | Role |
 |---|---|
-| LangGraph + Claude Sonnet | Agent graph + LLM narrator |
+| LangGraph + GPT-4o-mini (OpenAI) | Agent graph + LLM narrator |
 | Open-Meteo API | Free weather data, no auth required |
 | FastAPI + SQLModel | HTTP backend *(Step 5 — in progress)* |
 | APScheduler | Polling scheduler |
@@ -92,7 +92,7 @@ pip install -r requirements.txt
 Set your Anthropic API key:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
 ```
 
 ---
@@ -145,9 +145,3 @@ Architecture decisions, tradeoffs, and the rationale behind non-obvious choices 
 ## Vertical extensibility
 
 `MonitoringProfile` has a `context` field (`social_event` | `agriculture` | `energy` | `logistics`) and fully configurable per-variable thresholds. The same agent can monitor soil moisture thresholds for a farm or wind speed limits for a wind farm without code changes — only the profile configuration differs.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE)

@@ -34,7 +34,7 @@ Design decisions
 Fixes applied after review (v2)
 ---------------------------------
 A. Lazy LLM initialization: _llm was instantiated at module import time,
-   which caused an immediate failure (missing ANTHROPIC_API_KEY) even in
+   which caused an immediate failure (missing OPENAI_API_KEY) even in
    test runs that mock the LLM. The LLM is now created on first use via
    _get_llm(). DiffAnalyzer and SignificanceEvaluator have no credentials
    and remain module-level singletons — they are safe to construct at import.
@@ -71,7 +71,7 @@ from __future__ import annotations
 import json
 import logging
 
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from skygent.agent.state import AgentState
@@ -91,22 +91,22 @@ _diff_analyzer = DiffAnalyzer()
 _significance_evaluator = SignificanceEvaluator()
 
 # LLM is NOT initialized here — see _get_llm() below (fix A)
-_llm_instance: ChatAnthropic | None = None
+_llm_instance: ChatOpenAI | None = None
 
 
-def _get_llm() -> ChatAnthropic:
+def _get_llm() -> ChatOpenAI:
     """
     Return the shared LLM instance, creating it on first call.
 
     Lazy initialization ensures importing nodes.py never fails due to a
-    missing ANTHROPIC_API_KEY — the key is only required when the narrate
+    missing OPENAI_API_KEY — the key is only required when the narrate
     node actually runs, not at import time. This makes test collection and
     all non-LLM tests work without any environment variable.
     """
     global _llm_instance
     if _llm_instance is None:
-        _llm_instance = ChatAnthropic(
-            model="claude-sonnet-4-20250514",
+        _llm_instance = ChatOpenAI(
+            model="gpt-4o-mini",
             max_tokens=400,
         )
     return _llm_instance

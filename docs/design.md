@@ -134,7 +134,7 @@ The 6-hour polling cadence is the safety net. A storm that misses a 7 PM ceremon
 
 **Nodes never raise.** An unhandled exception in a LangGraph node does not route to `END` — it surfaces as an unhandled coroutine error. Every node catches its own exceptions and returns `{"error": message}` so the conditional edges always have a clean state to read.
 
-**Lazy LLM initialization.** `ChatAnthropic` is created on first use via `_get_llm()`, not at import time. Import-time initialization would require `ANTHROPIC_API_KEY` even in test runs that mock the LLM, breaking test collection for all 148 unit tests.
+**Lazy LLM initialization.** `ChatOpenAI` is created on first use via `_get_llm()`, not at import time. Import-time initialization would require `OPENAI_API_KEY` even in test runs that mock the LLM, breaking test collection for all 148 unit tests.
 
 **Stale state clearing.** LangGraph merges partial dicts without resetting unmentioned fields. `fetch_forecast_node` clears all downstream fields (`changes`, `significant`, `alert`, `triggering_variables`, `error`) at the start of every return dict so data from run N never bleeds into run N+1.
 
@@ -256,7 +256,7 @@ Run integration tests:
 # Live Open-Meteo API
 pytest -m integration tests/test_openmeteo.py -v
 
-# Real LLM narration (requires ANTHROPIC_API_KEY)
+# Real LLM narration (requires OPENAI_API_KEY)
 pytest -m integration tests/test_agent.py -v
 ```
 
