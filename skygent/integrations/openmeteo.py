@@ -299,10 +299,13 @@ async def fetch_forecast(
     data = _extract_target_row(response_json, target_date, profile)
     horizon_days = _compute_horizon_days(fetched_at, target_date)
 
-    # Open-Meteo returns the selected model name at the top level of the
-    # response when using the default Best Match. Capture it for transparency —
-    # which NWP model drove each snapshot is useful diagnostic information.
-    model_used: str | None = response_json.get("model")
+    # Open-Meteo's Best Match endpoint does not return a "model" field —
+    # it silently blends multiple NWP models without exposing which ones.
+    # We default to "best_match" (the parameter we requested) so the log
+    # and DB record are honest about what was used, even without model-level
+    # granularity. Explicitly requesting a named model (e.g. models=ecmwf_ifs)
+    # would populate this field but loses the Best Match blending benefit.
+    model_used: str = response_json.get("model", "best_match")
 
     snapshot = ForecastSnapshot(
         profile_id=profile.id,

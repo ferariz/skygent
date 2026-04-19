@@ -293,10 +293,12 @@ class ForecastSnapshot(BaseModel):
     # Precomputed at fetch time — drives confidence scoring.
     horizon_days: float
 
-    # NWP model that produced this snapshot, as reported by Open-Meteo.
-    # e.g. "best_match", "ecmwf_ifs025", "gfs_seamless".
-    # None for snapshots created before this field was added or in tests
-    # that do not set it explicitly.
+    # NWP model that produced this snapshot.
+    # "best_match" when using Open-Meteo's default blended endpoint (the
+    # API does not expose which models it selected). A specific model name
+    # (e.g. "ecmwf_ifs025", "gfs_seamless") if a model was requested
+    # explicitly via the models= parameter.
+    # None only for snapshots created before this field was added.
     model_used: str | None = None
 
     @model_validator(mode="after")
