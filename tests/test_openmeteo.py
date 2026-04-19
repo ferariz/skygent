@@ -336,6 +336,23 @@ class TestFetchForecast:
         with pytest.raises(OpenMeteoError):
             await fetch_forecast(PROFILE, client=mock_client)
 
+    async def test_non_json_response_raises_openmeteo_error(self):
+        """
+        A proxy or CDN can return HTML on a 200 (e.g. during maintenance).
+        response.json() is now in its own try/except so this surfaces as
+        OpenMeteoError rather than a raw ValueError escaping the caller.
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.side_effect = ValueError("not valid JSON")
+        mock_response.text = "<html>Bad Gateway</html>"
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(OpenMeteoError, match="non-JSON"):
+            await fetch_forecast(PROFILE, client=mock_client)
+
     async def test_correct_url_called(self):
         """The fetch must hit BASE_URL, not a typo or different endpoint."""
         resp = make_api_response(EVENT_DATE)

@@ -124,7 +124,17 @@ def _build_params(profile: MonitoringProfile, target_date: date) -> dict:
     # We use start_date + end_date so we can target a specific event date precisely.
     # end_date is capped at FORECAST_DAYS - 1 days out to stay within API limits.
     today = datetime.now(timezone.utc).date()
-    end_date = min(target_date, today + timedelta(days=FORECAST_DAYS - 1))
+    max_date = today + timedelta(days=FORECAST_DAYS - 1)
+
+    if target_date > max_date:
+        logger.warning(
+            "Event date %s is beyond the %d-day forecast window (max: %s). "
+            "Requesting up to max_date — target row will not be found and "
+            "fetch_forecast will raise OpenMeteoError.",
+            target_date, FORECAST_DAYS, max_date,
+        )
+
+    end_date = min(target_date, max_date)
 
     return {
         "latitude":   lat,
@@ -264,7 +274,6 @@ async def fetch_forecast(
         try:
             response = await c.get(BASE_URL, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            return response.json()
         except httpx.HTTPStatusError as exc:
             raise OpenMeteoError(
                 f"Open-Meteo returned HTTP {exc.response.status_code}: {exc.response.text[:200]}"
@@ -272,6 +281,13 @@ async def fetch_forecast(
         except httpx.RequestError as exc:
             raise OpenMeteoError(
                 f"Network error fetching forecast: {exc}"
+            ) from exc
+
+        try:
+            return response.json()
+        except Exception as exc:
+            raise OpenMeteoError(
+                f"Open-Meteo returned non-JSON response: {response.text[:200]}"
             ) from exc
 
     if client is not None:
@@ -283,18 +299,25 @@ async def fetch_forecast(
     data = _extract_target_row(response_json, target_date, profile)
     horizon_days = _compute_horizon_days(fetched_at, target_date)
 
+    # Open-Meteo returns the selected model name at the top level of the
+    # response when using the default Best Match. Capture it for transparency —
+    # which NWP model drove each snapshot is useful diagnostic information.
+    model_used: str | None = response_json.get("model")
+
     snapshot = ForecastSnapshot(
         profile_id=profile.id,
         fetched_at=fetched_at,
         target_datetime=profile.event_datetime,
         data=data,
         horizon_days=horizon_days,
+        model_used=model_used,
     )
 
     logger.info(
-        "Snapshot %s created: horizon=%.2f days, variables=%s",
+        "Snapshot %s created: horizon=%.2f days, model=%s, variables=%s",
         snapshot.id,
         snapshot.horizon_days,
+        model_used or "unknown",
         list(data.keys()),
     )
 

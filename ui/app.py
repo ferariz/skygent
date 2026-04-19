@@ -3,40 +3,22 @@ ui/app.py — Skygent Streamlit Dashboard
 ========================================
 
 Minimal functional dashboard covering three things:
-1. Register a new event for monitoring
+1. Register a new event for monitoring (with interactive map picker)
 2. View active profiles and scheduler status
 3. Browse generated alerts
 
 Design decisions
 ----------------
-1. Talks to the FastAPI backend via HTTP, not by importing skygent modules
-   directly. This keeps the UI layer decoupled — the dashboard could run
-   on a different machine from the backend. All data goes through the API.
-
-2. st.session_state for the API base URL: allows the user to point the
-   dashboard at a different backend (e.g. a deployed Railway instance)
-   without restarting Streamlit.
-
-3. No authentication for MVP: matches the API's own no-auth stance.
-   The dashboard is for local/single-user use.
-
-4. Auto-refresh via st.rerun() + a manual Refresh button: Streamlit does
-   not have a built-in polling mechanism. We offer a manual refresh button
-   rather than a timer-based rerun to avoid hammering the API during
-   development. Known tradeoff: the Settings sidebar reruns on every
-   keystroke while editing the URL — inherent Streamlit behavior, acceptable
-   for a local MVP.
-
-5. Error display with st.error() rather than exceptions: a failed API call
-   shows a user-friendly message, not a Python traceback.
-
-6. datetime.fromisoformat() is used to parse API timestamps. Python 3.11+
-   handles the Z suffix correctly; earlier versions require .replace("Z", "+00:00").
-   Skygent targets Python 3.11+ so this is safe, but documented here for
-   awareness if the dashboard is ever run on an older interpreter.
-
-7. Free-text fields (notes) are rendered with st.text(), not st.markdown(),
-   to avoid user-supplied text accidentally injecting markdown formatting.
+1. Talks to the FastAPI backend via HTTP only — decoupled, configurable URL.
+2. Map picker via streamlit-folium: user clicks to drop a pin, coordinates
+   populate automatically. No Google Maps API key required.
+3. st.session_state for map coordinates: persists the clicked location
+   across Streamlit reruns without losing the pin.
+4. st.text_area() for notes input (multiline), st.text() for notes display:
+   input uses text_area for usability; display uses st.text() to prevent
+   user-supplied markdown from injecting formatting in the profiles page.
+5. Manual refresh buttons instead of timer-based rerun: avoids hammering
+   the API during development.
 
 Run:
     streamlit run ui/app.py
@@ -47,12 +29,18 @@ from __future__ import annotations
 import requests
 import streamlit as st
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
+
+from streamlit_folium import st_folium
+import folium
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 DEFAULT_API_URL = "http://localhost:8000"
+DEFAULT_LAT = -34.9011   # Montevideo
+DEFAULT_LON = -56.1645
 
 st.set_page_config(
     page_title="Skygent",
@@ -62,6 +50,10 @@ st.set_page_config(
 
 if "api_url" not in st.session_state:
     st.session_state.api_url = DEFAULT_API_URL
+if "map_lat" not in st.session_state:
+    st.session_state.map_lat = DEFAULT_LAT
+if "map_lon" not in st.session_state:
+    st.session_state.map_lon = DEFAULT_LON
 
 
 def api(path: str) -> str:
@@ -73,7 +65,6 @@ def api(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 def get(path: str) -> dict | list | None:
-    """GET from the API. Returns parsed JSON or None on error."""
     try:
         resp = requests.get(api(path), timeout=5)
         resp.raise_for_status()
@@ -93,14 +84,11 @@ def get(path: str) -> dict | list | None:
 
 
 def post(path: str, payload: dict) -> dict | None:
-    """POST to the API. Returns parsed JSON or None on error."""
     try:
         resp = requests.post(api(path), json=payload, timeout=5)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.HTTPError as e:
-        # Prefer the FastAPI "detail" field; fall back to raw text if
-        # the error body is not JSON (e.g. a proxy returning HTML).
         try:
             detail = e.response.json().get("detail", e.response.text[:200])
         except Exception:
@@ -116,7 +104,6 @@ def post(path: str, payload: dict) -> dict | None:
 
 
 def delete(path: str) -> bool:
-    """DELETE from the API. Returns True on success."""
     try:
         resp = requests.delete(api(path), timeout=5)
         resp.raise_for_status()
@@ -136,11 +123,10 @@ def delete(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Confidence badge helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 _CONFIDENCE_COLOR = {"high": "🟢", "medium": "🟡", "low": "🔴"}
-
 
 def confidence_badge(c: str) -> str:
     return f"{_CONFIDENCE_COLOR.get(c, '⚪')} {c.capitalize()}"
@@ -152,24 +138,68 @@ def confidence_badge(c: str) -> str:
 
 def page_register():
     st.header("Register new event")
-    st.caption("Add an event to monitor. The first forecast fetch runs immediately.")
+    st.caption("Click the map to place your event location, then fill in the details below.")
 
+    # ── Map picker ────────────────────────────────────────────────────────────
+    m = folium.Map(
+        location=[st.session_state.map_lat, st.session_state.map_lon],
+        zoom_start=10,
+        tiles="CartoDB positron",
+    )
+
+    # Show current pin if already set
+    # Font Awesome icons may not render in all Leaflet/Folium environments.
+    # Fall back to the default marker if icon construction fails.
+    try:
+        marker_icon = folium.Icon(color="blue", icon="map-pin", prefix="fa")
+    except Exception:
+        marker_icon = folium.Icon(color="blue")
+
+    folium.Marker(
+        location=[st.session_state.map_lat, st.session_state.map_lon],
+        tooltip="Event location",
+        icon=marker_icon,
+    ).add_to(m)
+
+    map_result = st_folium(
+        m,
+        width="100%",
+        height=350,
+        returned_objects=["last_clicked"],
+        key="register_map",
+    )
+
+    # Update coordinates when user clicks the map
+    if map_result and map_result.get("last_clicked"):
+        clicked = map_result["last_clicked"]
+        st.session_state.map_lat = round(clicked["lat"], 6)
+        st.session_state.map_lon = round(clicked["lng"], 6)
+        st.rerun()
+
+    # Show selected coordinates
+    col_lat, col_lon = st.columns(2)
+    col_lat.metric("Latitude", f"{st.session_state.map_lat:.4f}")
+    col_lon.metric("Longitude", f"{st.session_state.map_lon:.4f}")
+
+    st.caption("Click anywhere on the map to move the pin. Zoom in for precision.")
+    st.divider()
+
+    # ── Event details form ────────────────────────────────────────────────────
     with st.form("register_form"):
         name = st.text_input("Event name", placeholder="Ana & Juan's Wedding")
 
         col1, col2 = st.columns(2)
         with col1:
-            lat = st.number_input("Latitude", min_value=-90.0, max_value=90.0,
-                                  value=-34.9011, format="%.4f")
             event_date = st.date_input(
                 "Event date",
                 value=datetime.now(timezone.utc).date() + timedelta(days=30),
             )
             check_interval = st.slider("Check interval (hours)", 1, 24, 6)
         with col2:
-            lon = st.number_input("Longitude", min_value=-180.0, max_value=180.0,
-                                  value=-56.1645, format="%.4f")
-            event_time = st.time_input("Event time (UTC)", value=datetime.strptime("17:00", "%H:%M").time())
+            event_time = st.time_input(
+                "Event time (UTC)",
+                value=datetime.strptime("17:00", "%H:%M").time(),
+            )
             duration = st.slider("Event duration (hours)", 1, 12, 4)
 
         context = st.selectbox(
@@ -198,8 +228,8 @@ def page_register():
 
         payload = {
             "name": name,
-            "latitude": lat,
-            "longitude": lon,
+            "latitude": st.session_state.map_lat,
+            "longitude": st.session_state.map_lon,
             "event_datetime": event_dt.isoformat(),
             "check_interval_hours": check_interval,
             "event_duration_hours": duration,
@@ -210,7 +240,8 @@ def page_register():
         result = post("/api/v1/profiles", payload)
         if result:
             st.success(
-                f"✅ **{result['name']}** registered! "
+                f"✅ **{result['name']}** registered at "
+                f"({result['location'][0]:.4f}, {result['location'][1]:.4f}).  \n"
                 f"First forecast fetch queued immediately.  \n"
                 f"Profile ID: `{result['id']}`"
             )
@@ -252,7 +283,10 @@ def page_profiles():
         event_dt = datetime.fromisoformat(p["event_datetime"])
         days_left = (event_dt - datetime.now(timezone.utc)).days
 
-        with st.expander(f"📍 {p['name']}  —  {days_left}d to event", expanded=False):
+        with st.expander(
+            f"📍 {p['name']}  —  {days_left}d to event",
+            expanded=False,
+        ):
             c1, c2, c3 = st.columns(3)
             c1.markdown(f"**Location**  \n{p['location'][0]:.4f}, {p['location'][1]:.4f}")
             c2.markdown(f"**Event date**  \n{event_dt.strftime('%b %d, %Y %H:%M')} UTC")
@@ -294,7 +328,7 @@ def page_alerts():
 
     path = f"/api/v1/alerts?limit={limit}"
     if profile_filter.strip():
-        path += f"&profile_id={profile_filter.strip()}"
+        path += f"&profile_id={quote(profile_filter.strip())}"
 
     alerts = get(path)
     if alerts is None:

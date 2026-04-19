@@ -101,7 +101,7 @@ class ProfileRow(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     name: str
-    event_datetime: datetime          # indexed for active_only filtering
+    event_datetime: datetime = Field(index=True)  # active_only filtering
     is_active: bool = True            # flipped on explicit deregistration
     data: str                         # JSON-serialized MonitoringProfile
 
@@ -120,7 +120,8 @@ class SnapshotRow(SQLModel, table=True):
     profile_id: str = Field(index=True)
     fetched_at: datetime
     horizon_days: float
-    deregistered_at: datetime | None = Field(default=None)  # fix B
+    model_used: str | None = Field(default=None)  # NWP model name from Open-Meteo
+    deregistered_at: datetime | None = Field(default=None)
     data: str                         # JSON-serialized ForecastSnapshot
 
 
@@ -224,6 +225,7 @@ def save_snapshot(session: Session, snapshot: ForecastSnapshot) -> SnapshotRow:
         profile_id=snapshot.profile_id,
         fetched_at=snapshot.fetched_at,
         horizon_days=snapshot.horizon_days,
+        model_used=snapshot.model_used,
         deregistered_at=None,
         data=snapshot.model_dump_json(),
     )
@@ -301,9 +303,10 @@ def list_alerts(
     Return recent alerts, most recent first.
     Optionally filtered by profile_id.
     """
-    stmt = select(AlertRow).order_by(AlertRow.detected_at.desc()).limit(limit)
+    stmt = select(AlertRow)
     if profile_id:
         stmt = stmt.where(AlertRow.profile_id == profile_id)
+    stmt = stmt.order_by(AlertRow.detected_at.desc()).limit(limit)
     rows = session.exec(stmt).all()
     return [Alert.model_validate_json(r.data) for r in rows]
 
@@ -343,6 +346,11 @@ class DBSnapshotStore:
 
     @property
     def profile_ids(self) -> list[str]:
+        """
+        Return distinct profile IDs that have at least one snapshot.
+        select(Column).distinct() returns single-column Row objects —
+        we unpack each to a plain string.
+        """
         with get_session_sync() as session:
             rows = session.exec(select(SnapshotRow.profile_id).distinct()).all()
-            return list(rows)
+            return [row[0] if isinstance(row, tuple) else row for row in rows]

@@ -147,11 +147,11 @@ class MonitoringProfile(BaseModel):
     # Production upgrade path (post-MVP):
     #   Switch openmeteo.py to the hourly endpoint. Extract the window
     #   [event_datetime, event_datetime + event_duration_hours]. Aggregate:
-    #     precipitation_probability -> max over window (pessimistic, correct
-    #                                  for planning decisions)
-    #     temperature_2m            -> mean over window (sustained comfort)
-    #     windspeed_10m             -> max over window (peak gust tips tents)
-    #     weather_code              -> worst severity rank in window
+    #     precipitation_probability_max -> max over window (pessimistic,
+    #                                      correct for planning decisions)
+    #     temperature_2m_max           -> mean over window (sustained comfort)
+    #     wind_speed_10m_max           -> max over window (peak gust tips tents)
+    #     weather_code                 -> worst severity rank in window
     #   The diff engine and significance evaluator require no changes since
     #   they operate on one scalar per variable regardless of derivation.
     event_duration_hours: int = Field(default=4, ge=1)
@@ -257,7 +257,11 @@ class MonitoringProfile(BaseModel):
         """True while the event is still in the future."""
         event = self.event_datetime
         if event.tzinfo is None:
-            return datetime.utcnow() < event
+            # Naive datetime — strip tzinfo for comparison.
+            # datetime.utcnow() was deprecated in 3.12; use utcfromtimestamp.
+            return datetime.utcfromtimestamp(
+                datetime.now(timezone.utc).timestamp()
+            ) < event
         return datetime.now(timezone.utc) < event
 
 
@@ -288,6 +292,12 @@ class ForecastSnapshot(BaseModel):
 
     # Precomputed at fetch time — drives confidence scoring.
     horizon_days: float
+
+    # NWP model that produced this snapshot, as reported by Open-Meteo.
+    # e.g. "best_match", "ecmwf_ifs025", "gfs_seamless".
+    # None for snapshots created before this field was added or in tests
+    # that do not set it explicitly.
+    model_used: str | None = None
 
     @model_validator(mode="after")
     def horizon_must_be_non_negative(self) -> "ForecastSnapshot":

@@ -24,3 +24,5 @@ httpx   # also used by TestClient
 
 # Dashboard
 streamlit>=1.30
+streamlit-folium>=0.18
+folium>=0.16
