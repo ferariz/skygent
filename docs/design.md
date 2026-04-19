@@ -1,6 +1,6 @@
 # Skygent — Design Document
 
-> Steps 1–4 complete. Last updated April 2026.
+> All 7 steps complete. Last updated April 2026.
 
 ---
 
@@ -8,12 +8,15 @@
 
 1. [Architecture overview](#1-architecture-overview)
 2. [Core data models](#2-core-data-models)
-3. [Step 2 — Open-Meteo integration](#3-step-2--open-meteo-integration)
-4. [Step 3 — LangGraph agent](#4-step-3--langgraph-agent)
-5. [Step 5 — Scheduler](#5-step-4--scheduler)
-6. [Key design decisions](#6-key-design-decisions)
-7. [Test coverage](#7-test-coverage)
-8. [What comes next](#8-what-comes-next)
+3. [Open-Meteo integration](#3-open-meteo-integration)
+4. [LangGraph agent](#4-langgraph-agent)
+5. [Scheduler](#5-scheduler)
+6. [FastAPI + database layer](#6-fastapi--database-layer)
+7. [Telegram notifications](#7-telegram-notifications)
+8. [Streamlit dashboard](#8-streamlit-dashboard)
+9. [Key design decisions](#9-key-design-decisions)
+10. [Test coverage](#10-test-coverage)
+11. [Portfolio strengthening — branch feat/portfolio-strengthening](#11-portfolio-strengthening)
 
 ---
 
@@ -26,8 +29,8 @@ Skygent runs as a scheduled agentic loop. Each active monitoring profile trigger
 | `fetch_forecast` | No | Calls Open-Meteo, returns `ForecastSnapshot` |
 | `analyze_diff` | No | Runs `DiffAnalyzer`, returns `dict[str, VariableChange]` |
 | `evaluate_significance` | No | Runs `SignificanceEvaluator`, builds `Alert` skeleton if triggered |
-| `narrate` | **Yes** | Calls Claude with structured JSON payload, fills `Alert.narrative` |
-| `notify` | No | Delivers alert (log stub — Telegram wired in Step 6) |
+| `narrate` | **Yes** | Calls GPT-4o-mini with structured JSON payload, fills `Alert.narrative` |
+| `notify` | No | Delivers alert via Telegram |
 
 The graph has a conditional edge after every node. Most runs exit after `evaluate_significance` with `significant=False` — the LLM is never called on these runs.
 
@@ -41,7 +44,7 @@ Three Pydantic v2 models form the data contract shared by every layer.
 
 ### MonitoringProfile
 
-The unit of configuration. One profile = one event. The scheduler, agent nodes, diff engine, and significance evaluator all receive a profile.
+The unit of configuration. One profile = one event.
 
 | Field | Purpose / constraint |
 |---|---|
@@ -52,15 +55,18 @@ The unit of configuration. One profile = one event. The scheduler, agent nodes, 
 | `monitoring_start` | UTC-aware — defaults to `now()` |
 | `check_interval_hours` | `int >= 1` — enforced; 0 would spin APScheduler |
 | `event_duration_hours` | `int >= 1` — MVP unused, documents hourly upgrade path |
-| `variables` | Open-Meteo variable names to fetch (`wind_speed_10m_max`, `weather_code`, etc.) |
+| `variables` | Open-Meteo variable names to fetch |
 | `thresholds` | Per-variable alert magnitude — must be a subset of `variables` |
 | `context` | `social_event` \| `agriculture` \| `energy` \| `logistics` |
+| `notification_channel` | `"telegram"` (default) — routes `notify_node` |
 
 ### ForecastSnapshot
 
 An immutable point-in-time capture of the forecast. Snapshots are never mutated — the diff engine always compares two distinct objects.
 
 `horizon_days` is computed at fetch time and stored because it drives confidence scoring. Recomputing it later would require knowing the original fetch time, which is fragile.
+
+`model_used` (added in portfolio-strengthening branch) stores the NWP model name returned by Open-Meteo (e.g. `"best_match"`, `"ecmwf_ifs025"`). `None` for snapshots created before this field was added or in tests that do not set it explicitly. This makes each snapshot a complete audit artifact — not just numbers, but also provenance.
 
 ### Alert
 
@@ -84,75 +90,55 @@ class VariableChange(TypedDict):
 
 ---
 
-## 3. Step 2 — Open-Meteo integration
+## 3. Open-Meteo integration
 
 ### Timezone strategy
 
-We always request `timezone=UTC`. Using `timezone=auto` would return local-time date strings, making date-matching dependent on the UTC offset of each location. UTC date strings are stable, unambiguous, and consistent across all profiles worldwide.
-
-Open-Meteo daily aggregates are computed over the 24-hour UTC day. For a Montevideo event at 16:00 local (19:00 UTC), the UTC-day aggregate is correct for planning purposes.
+We always request `timezone=UTC`. UTC date strings are stable, unambiguous, and consistent across all profiles regardless of location.
 
 ### API parameter design
 
-`forecast_days` and `start_date`/`end_date` are mutually exclusive on the Open-Meteo API. We use `start_date` + `end_date` to target a specific event date precisely. `FORECAST_DAYS` is used only to compute the `end_date` cap.
+`forecast_days` and `start_date`/`end_date` are mutually exclusive on the Open-Meteo API. We use `start_date` + `end_date` to target a specific event date precisely.
 
-### Variable name correctness
+### model_used capture
 
-The correct Open-Meteo daily variable names are:
-- `wind_speed_10m_max` (not `windspeed_10m_max`)
-- `weather_code` (not `weathercode`)
+The Open-Meteo response includes a top-level `"model"` field naming the NWP model selected by Best Match. We extract it and store it on `ForecastSnapshot.model_used`. For Montevideo (34.9°S), Best Match typically selects ECMWF IFS HRES (9 km) as the global backbone. The log line now reads:
 
-Using the wrong names produces a silent failure: the HTTP call succeeds, the response parses correctly, but the row extraction returns `None` for both variables with no error. This was caught during Cursor review and fixed in `models.py` defaults and all downstream references.
-
-`CATEGORICAL_VARIABLES` in `diff.py` must use `"weather_code"` to match `profile.variables`, otherwise the filter never fires and WMO codes enter the numeric diff loop producing meaningless arithmetic.
+```
+Snapshot abc123 created: horizon=5.20 days, model=best_match, variables=[...]
+```
 
 ### Daily vs hourly — documented tradeoff
 
-**MVP uses daily aggregates** (`temperature_2m_max`, `wind_speed_10m_max`, `precipitation_probability_max`). These represent the worst case for the full calendar day, not a specific event window. A wedding at 7 PM and one at noon receive the same daily aggregate.
+**MVP uses daily aggregates.** These represent the worst case for the full calendar day, not a specific event window.
 
-**Why daily is defensible for MVP:**
-
-The 6-hour polling cadence is the safety net. A storm that misses a 7 PM ceremony window almost certainly appeared in an earlier poll as a deteriorating forecast and triggered an alert. If conditions improve, the next poll fires a second alert (bidirectional `weather_code` logic handles both directions). The LLM narrator frames residual uncertainty explicitly in every message: *"medium confidence 5 days out, re-checked every 6 hours — conditions may still shift."*
-
-**Production upgrade path:**
-
-`event_duration_hours` (default 4h) is already stored on `MonitoringProfile`. To upgrade:
+**Production upgrade path** — `event_duration_hours` is already stored on `MonitoringProfile`. To upgrade:
 1. Switch `openmeteo.py` to the hourly endpoint
 2. Extract the window `[event_datetime, event_datetime + event_duration_hours]`
-3. Aggregate: `precipitation_probability` → max, `temperature_2m` → mean, `wind_speed_10m` → max, `weather_code` → worst severity rank
-4. The diff engine and significance evaluator require **no changes** — they operate on one scalar per variable regardless of derivation
+3. Aggregate: `precipitation_probability_max` → max, `temperature_2m_max` → mean, `wind_speed_10m_max` → max, `weather_code` → worst severity rank
+4. The diff engine and significance evaluator require **no changes**
+
+### Error handling
+
+Both `raise_for_status()` and `response.json()` are in separate try/except blocks. A proxy returning HTML on a 200 (common during maintenance) would fail on JSON parsing, not on status — previously this escaped as a raw `ValueError`. Now always wrapped as `OpenMeteoError`.
+
+A WARNING is logged when `target_date` exceeds the forecast window so the subsequent `OpenMeteoError` from `_extract_target_row` has context.
 
 ---
 
-## 4. Step 3 — LangGraph agent
-
-### AgentState
-
-`AgentState` is a `TypedDict` with all fields `Optional` and defaulting to `None`. LangGraph merges partial dicts returned by nodes — nodes only return the fields they changed. All fields are present in the initial state dict to avoid `KeyError` on any access pattern.
+## 4. LangGraph agent
 
 ### Node design principles
 
-**Nodes never raise.** An unhandled exception in a LangGraph node does not route to `END` — it surfaces as an unhandled coroutine error. Every node catches its own exceptions and returns `{"error": message}` so the conditional edges always have a clean state to read.
+**Nodes never raise.** Every node catches its own exceptions and returns `{"error": message}`.
 
-**Lazy LLM initialization.** `ChatOpenAI` is created on first use via `_get_llm()`, not at import time. Import-time initialization would require `OPENAI_API_KEY` even in test runs that mock the LLM, breaking test collection for all 148 unit tests.
+**Lazy LLM initialization.** `ChatOpenAI` is created on first use via `_get_llm()`. Import-time initialization would require `OPENAI_API_KEY` even in unit tests that mock the LLM.
 
-**Stale state clearing.** LangGraph merges partial dicts without resetting unmentioned fields. `fetch_forecast_node` clears all downstream fields (`changes`, `significant`, `alert`, `triggering_variables`, `error`) at the start of every return dict so data from run N never bleeds into run N+1.
-
-Ownership of clearing:
-- `fetch_forecast_node` — clears everything downstream
-- `analyze_diff_node` — clears `significant`, `triggering_variables`, `alert`
-- `evaluate_significance_node` — clears `alert` when `significant=False`
+**Stale state clearing.** `fetch_forecast_node` clears all downstream fields on every run so data from run N never bleeds into run N+1.
 
 ### Narrator prompt design
 
-The LLM receives a **structured JSON payload** — not a prose description — so it cannot hallucinate field names or values.
-
-System prompt constraints:
-- Plain prose only, no markdown
-- Under 200 words
-- Always state: what changed and by how much, confidence level and its meaning, when the next check runs
-- Tone tailored to `profile.context`
-- Never invent data — only describe what is in the provided JSON
+The LLM receives a **structured JSON payload** — not a prose description — so it cannot hallucinate field names or values. System prompt constraints: plain prose, under 200 words, always state confidence level and next check time, tone tailored to `profile.context`.
 
 ### Graph structure
 
@@ -163,22 +149,13 @@ fetch_forecast
 [error or first run?] ──► END
      │
      ▼
-analyze_diff
+analyze_diff → evaluate_significance
      │
      ▼
-[error?] ──► END
+[not significant?] ──► END   ← common case, LLM never called
      │
      ▼
-evaluate_significance
-     │
-     ▼
-[error or not significant?] ──► END   ← common case, LLM never called
-     │
-     ▼
-narrate  ← only LLM call in the system
-     │
-     ▼
-[error?] ──► END
+narrate ← only LLM call in the system
      │
      ▼
 notify → END
@@ -186,96 +163,174 @@ notify → END
 
 ---
 
-## 5. Step 4 — Scheduler
+## 5. Scheduler
 
 ### AsyncIOScheduler
 
-`AsyncIOScheduler` runs jobs directly on the existing asyncio event loop. `BackgroundScheduler` runs jobs in a thread pool, requiring `asyncio.run()` inside each job — creating a new event loop per invocation. Since the entire agent stack is async, `AsyncIOScheduler` is the correct choice.
+`AsyncIOScheduler` runs jobs directly on the existing asyncio event loop. `BackgroundScheduler` would require `asyncio.run()` inside each job, creating a new event loop per invocation — wrong for an async stack.
 
 ### One job per profile
 
-Each `MonitoringProfile` gets its own `IntervalTrigger` job keyed by profile ID. Jobs are registered with `next_run_time=datetime.now(UTC)` so the first fetch happens immediately — giving the system a baseline snapshot without waiting a full interval. Without a baseline, the second run is also a no-op (nothing to diff against).
+Each profile gets its own `IntervalTrigger` job with `next_run_time=datetime.now(UTC)` so the first fetch happens immediately, giving the system a baseline snapshot.
 
-`max_instances=1` prevents overlapping runs for the same profile if a run takes longer than the interval.
+### SnapshotStore and set_snapshot_store()
 
-### SnapshotStore
-
-The scheduler needs one thing between runs: the previous snapshot to pass to `run_agent()`. For the MVP this is an in-memory dict with a `get`/`set`/`clear` interface. The FastAPI layer (Step 5) will replace it with a SQLModel-backed store. Because the scheduler only calls `store.get()` and `store.set()`, that replacement requires **zero changes** to `jobs.py`.
-
-### Expiry handling
-
-`register_profile()` checks `profile.is_active` before adding a job. The job itself also checks at runtime — handling profiles that expire between scheduler restarts. On expiry detection, the job removes itself **and clears the snapshot store entry**, preventing stale in-memory data from persisting until the next restart.
+The scheduler uses a module-level `_snapshot_store` with a `get`/`set`/`clear` interface. `set_snapshot_store()` is a public setter (added after Cursor review) that `main.py` calls at startup to swap in the `DBSnapshotStore`. Using an explicit setter decouples `main.py` from the private attribute name.
 
 ---
 
-## 6. Key design decisions
+## 6. FastAPI + database layer
 
-These are the decisions that would look arbitrary without context.
+### Separate DB models from domain models
 
-### `weather_code` not `weathercode`
+`ProfileRow`, `SnapshotRow`, `AlertRow` are SQLModel table classes that store JSON-serialized domain objects in a `data` TEXT column. Only fields needed for queries/filtering are stored as indexed columns — this avoids schema migrations during early development.
 
-Open-Meteo API uses `weather_code` with an underscore. Wrong name → silent `None` values in every snapshot, no error, no alert ever fired for wind or weather conditions. `CATEGORICAL_VARIABLES` must match `profile.variables` exactly or the filter never fires and WMO codes enter the numeric diff loop.
+### is_active staleness fix
+
+`list_profiles(active_only=True)` filters by both `is_active=True` AND `event_datetime > now()`. A stored boolean alone would return expired profiles whose `is_active` was never explicitly flipped.
+
+### Snapshot deregistration
+
+`deregister_snapshots()` sets a `deregistered_at` timestamp rather than deleting rows. `load_latest_snapshot()` skips deregistered snapshots so a re-registered profile starts a fresh diff baseline. Audit history is retained.
+
+### AlertRow — no denormalized columns
+
+`AlertRow` stores only `id`, `profile_id`, `detected_at`, and the full JSON `data`. All reads go through `Alert.model_validate_json(row.data)` — one source of truth, no drift possible between columns and JSON payload.
+
+### SnapshotRow.model_used
+
+Added as part of the portfolio-strengthening branch. Stored as a nullable column alongside the JSON blob — queryable for diagnostics without a full JSON parse.
+
+### ProfileRow.event_datetime index
+
+`Field(index=True)` added after Cursor review found the column was described as indexed in a comment but the SQLModel field definition was missing it. Fixes a full table scan on every active-profile query.
+
+### POST /profiles atomicity
+
+`save_profile()` and `register_profile()` must succeed or fail together. If scheduling fails, raising `HTTPException` triggers the session dependency's rollback — no orphaned profile row is committed to the DB.
+
+---
+
+## 7. Telegram notifications
+
+### HTML over MarkdownV2
+
+Telegram's MarkdownV2 requires escaping dozens of special characters that LLM-generated narratives may contain. HTML only requires escaping `<`, `>`, `&` — much safer for dynamic text.
+
+### Message structure
+
+Narrative first (the important part), structured metadata below (horizon, triggers, next check). This gives the user the actionable information first.
+
+### Error handling
+
+`response.json()` is in a separate try/except from `raise_for_status()`, converting `JSONDecodeError` to `TelegramError`. A proxy returning HTML on a 200 previously escaped as a raw `ValueError`.
+
+### HTML-safe truncation
+
+Messages exceeding 4096 chars are truncated back to before any unclosed `<` tag to avoid Telegram rejecting malformed HTML.
+
+### notify_node routing
+
+Routes on `profile.notification_channel`. Unknown channels log and mark as sent rather than erroring — the alert was generated and attempted, delivery through an unsupported channel is not a pipeline failure.
+
+---
+
+## 8. Streamlit dashboard
+
+### HTTP-only, decoupled from backend
+
+`ui/app.py` talks to the FastAPI backend via `requests`, not by importing `skygent` modules. The dashboard can run on a different machine from the API. The API URL is configurable in the Settings sidebar and stored in `st.session_state`.
+
+### Map picker
+
+`streamlit-folium` renders an interactive Folium map. The user clicks to drop a pin; coordinates update in `st.session_state` and persist across reruns. Defaults to Montevideo (-34.9011, -56.1645). CartoDB Positron tile layer — no API key required.
+
+Marker icon uses `folium.Icon(color="blue", icon="map-pin", prefix="fa")` with a try/except fallback to the default marker in case Font Awesome is unavailable in the Leaflet environment.
+
+### Notes display: st.text() not st.markdown()
+
+Free-text fields (notes) are rendered with `st.text()` to prevent user-supplied markdown from injecting formatting. Input uses `st.text_area()` for usability; display uses `st.text()` for safety.
+
+### Manual refresh
+
+Refresh buttons rather than timer-based `st.rerun()` to avoid hammering the API during development.
+
+---
+
+## 9. Key design decisions
+
+### weather_code not weathercode
+
+Open-Meteo API uses `weather_code` with an underscore. Wrong name → silent `None` values, no error, no alert ever fired. `CATEGORICAL_VARIABLES` must match `profile.variables` exactly.
 
 ### Bidirectional weathercode alerts
 
-Significant improvement (thunderstorm → clear) is as actionable as deterioration. A user who cancelled outdoor plans because of a storm forecast deserves an *"actually it's clear now"* alert. `abs(rank_delta) >= threshold` handles both directions; the narrator receives the direction and frames the message accordingly.
+`abs(rank_delta) >= threshold` handles both deterioration and improvement. A user who cancelled outdoor plans deserves an "actually it's clear now" alert.
 
 ### Negative horizon → ValueError
 
-`horizon_to_confidence(-1.0)` would silently return `"high"` without the guard (because `-1.0 <= 3.0`). That is the worst possible answer for a past event — it would label an already-occurred wedding as high-confidence. The `ValueError` surfaces the upstream scheduling bug immediately.
+`horizon_to_confidence(-1.0)` would silently return `"high"` (because `-1.0 <= 3.0`). That is the worst possible answer for a past event. The guard surfaces the upstream scheduling bug immediately.
 
-### No retry logic in openmeteo.py
+### set_snapshot_store() over _snapshot_store mutation
 
-Retry belongs at the scheduler level (job error handling) or in an httpx Transport, not embedded in the fetch function. Adding it there would make the function harder to test and hide transient failures from the agent's state machine.
+Direct attribute mutation from `main.py` couples it to the private naming of `jobs.py`. A public setter is a stable contract, testable, and makes the injection point visible in the module's public API.
 
-### Internal/API name split abandoned
+### DB deletion strategy: soft-delete snapshots, hard-delete nothing
 
-An earlier version used `"weathercode"` internally and `"weather_code"` as the API key, with translation at `.data.get()` call sites. This introduced the exact bug it was meant to prevent: `CATEGORICAL_VARIABLES` used the internal name, so the filter never matched `profile.variables`. One name everywhere is simpler and auditable with a single grep.
+Snapshots are never deleted — `deregistered_at` timestamps them out of the diff baseline while retaining full audit history. Alerts and profiles are similarly retained on deregistration (`is_active=False`). The DB is append-only from a data integrity perspective.
 
-### `next_run_time=datetime.now()` on registration
+### SQLite for MVP, migration story documented
 
-Without this, a profile registered at 14:00 with a 6-hour interval would first run at 20:00. Immediate first run gives a baseline snapshot so the second run has something to diff against. The parameter is `datetime.now(timezone.utc)` — not `None`. In APScheduler 3.x, `None` means "don't schedule an immediate run."
+`create_db_and_tables()` uses `SQLModel.metadata.create_all()` which only creates missing tables — it never alters existing ones. Adding a new column (e.g. `model_used`) requires either deleting the DB file (acceptable for test data) or a proper migration via Alembic (required for production data). This tradeoff is documented here so it is not a surprise.
 
 ---
 
-## 7. Test coverage
+## 10. Test coverage
 
-148 unit tests, 2 integration tests (deselected by default via `pytest.ini`).
+204 unit tests, 3 integration tests (deselected by default).
 
 | Test file | Tests | What is covered |
 |---|---|---|
 | `test_diff.py` | 20 | Delta math, None values, identity guards, categorical exclusion |
-| `test_significance.py` | 34 | Confidence boundaries, weathercode ranks, bidirectional alerts, alert factory |
-| `test_openmeteo.py` | 30 | Params, horizon computation, row extraction, mocked HTTP, live API |
+| `test_significance.py` | 34 | Confidence boundaries, weathercode ranks, bidirectional alerts |
+| `test_openmeteo.py` | 31 | Params, horizon, row extraction, mocked HTTP, non-JSON error, live API |
 | `test_agent.py` | 37 | Routing logic, all nodes, full graph, lazy LLM init, stale state clearing |
-| `test_scheduler.py` | 29 | SnapshotStore, job registration/expiry, job function, lifecycle |
-
-Run integration tests:
-
-```bash
-# Live Open-Meteo API
-pytest -m integration tests/test_openmeteo.py -v
-
-# Real LLM narration (requires OPENAI_API_KEY)
-pytest -m integration tests/test_agent.py -v
-```
+| `test_scheduler.py` | 30 | SnapshotStore, set_snapshot_store(), job registration/expiry, lifecycle |
+| `test_api.py` | 42 | CRUD helpers, all endpoints, POST atomicity, deregister flow |
+| `test_telegram.py` | 21 | Message formatting, HTML escaping, HTTP errors, non-JSON error, live delivery |
 
 ---
 
-## 8. What comes next
+## 11. Portfolio strengthening
 
-**Step 5 — FastAPI routes (`skygent/api/routes.py`)**
-- `POST /profiles` — register an event for monitoring
-- `GET /profiles` — list active profiles and their scheduler status
-- `GET /alerts` — list generated alerts
-- `GET /status` — scheduler health and job summary
-- Replace in-memory `SnapshotStore` with SQLModel + SQLite persistence
+Changes made on branch `feat/portfolio-strengthening`, merged to `main`.
 
-**Step 6 — Telegram notifications (`skygent/integrations/telegram.py`)**
-- Replace the `notify_node` log stub with real Telegram Bot API delivery
-- Node interface is already final — only the delivery implementation changes
+### ForecastSnapshot.model_used
 
-**Step 7 — Streamlit dashboard (`ui/app.py`)**
-- Register and manage profiles
-- View alert history with narrative and confidence indicators
-- Live scheduler status
+Added `model_used: str | None = None` to `ForecastSnapshot`. Open-Meteo's response includes a top-level `"model"` field. Storing it on every snapshot makes each one a complete audit artifact — not just forecast values, but also which NWP model produced them. `None`-safe for backwards compatibility with existing rows and tests.
+
+Propagated through: `openmeteo.py` (capture from response) → `ForecastSnapshot` (domain model) → `SnapshotRow.model_used` (DB column) → log line (now shows model alongside horizon).
+
+### Map picker in dashboard
+
+`streamlit-folium` and `folium` added as dependencies. The Register event page now shows an interactive map — the user clicks to place a pin rather than typing raw coordinates. Coordinates persist in `st.session_state` across Streamlit reruns.
+
+### Error hardening across the stack
+
+Consistent `response.json()` try/except pattern applied to both `openmeteo.py` and the existing `telegram.py` — converts JSON parse failures to domain exceptions (`OpenMeteoError`, `TelegramError`) rather than letting raw `ValueError` escape to callers.
+
+### Doc drift fixes in models.py
+
+Variable names in the `event_duration_hours` upgrade path comment corrected: `windspeed_10m` → `wind_speed_10m_max`, `temperature_2m` → `temperature_2m_max`. The comment now matches the actual API variable names used throughout the codebase.
+
+`datetime.utcnow()` in `is_active` replaced with `datetime.utcfromtimestamp(datetime.now(timezone.utc).timestamp())` — `utcnow()` was deprecated in Python 3.12.
+
+### Database correctness fixes
+
+- `ProfileRow.event_datetime`: `Field(index=True)` — previously described as indexed in a comment but the definition was missing it
+- `list_alerts`: `.where()` applied before `.order_by().limit()` — conventional SQLAlchemy ordering
+- `profile_ids`: single-column `Row` tuples unpacked to plain strings — SQLModel returns `Row` objects from column-level selects, not scalars
+
+### SQLite migration note
+
+Adding `model_used` to `SnapshotRow` is a schema change. `create_db_and_tables()` does not alter existing tables. For test/development environments, deleting `skygent.db` and restarting is the correct approach. For production environments with real data, use Alembic to generate an `ALTER TABLE snapshots ADD COLUMN model_used TEXT` migration.
