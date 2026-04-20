@@ -116,10 +116,47 @@ diff engine → significance evaluator → GPT-4o-mini → Telegram delivery.
 
 ## [Unreleased] — feat/telegram-bot-conversation
 
-### Planned
+### Added
 
-- Inbound Telegram message handler (polling-based)
-- Conversation state machine: location pin → date → duration → context →
-  confirm → register
-- Welcome message on registration: initial forecast narrative via GPT-4o-mini
-- User-to-profile mapping: Telegram chat_id stored on `MonitoringProfile`
+**Telegram bot inbound handler (`skygent/integrations/telegram_bot.py`)**
+- Polling-based inbound message handler (no public URL required)
+- SQLite-backed conversation state machine — survives bot restarts
+- Conversation flow: /start → location pin → name → date → time →
+  context (keyboard) → duration (keyboard) → confirm → register
+- Natural date parsing via `dateparser` (handles "Sep 15", "2026-09-15",
+  "15/09/2026" and more)
+- Inline keyboard buttons for structured choices (context, duration, confirm)
+- Welcome forecast on registration: fetches real forecast, generates
+  GPT-4o-mini narrative framed as introduction not alert
+- Conversation expiry: stale state cleared after 24 hours
+- /cancel command at any step
+
+**Bot entry point (`skygent/bot.py`)**
+- Long-polling loop (timeout=30s, offset tracking, retry on error)
+- Runs as separate process alongside uvicorn
+- Graceful shutdown on Ctrl+C
+
+**Database (`skygent/api/database.py`)**
+- `ConversationStateRow` table: chat_id, step, data (JSON), updated_at
+- `get/save/clear_conversation_state()` CRUD helpers
+
+**Core models (`skygent/core/models.py`)**
+- `MonitoringProfile.telegram_chat_id: str | None` — routes alerts to
+  the registering user's chat rather than the shared env var
+
+**Agent (`skygent/agent/nodes.py`)**
+- `notify_node` routes to `profile.telegram_chat_id` when set,
+  falls back to `TELEGRAM_CHAT_ID` env var for API/dashboard registrations
+
+### Design decisions
+
+- **Polling over webhooks**: no public URL required for local development.
+  Switch to webhooks for production deployment (one-line change).
+- **SQLite state over in-memory**: state survives restarts and WatchFiles
+  reloads during development. Existing DB stack reused at near-zero cost.
+- **dateparser for natural input**: handles all common date formats without
+  custom parsing logic.
+- **Separate process from uvicorn**: polling loop is synchronous and blocking;
+  keeping it separate from the async API process avoids event loop conflicts.
+- **Per-user chat routing**: `telegram_chat_id` on `MonitoringProfile` enables
+  multi-user deployment without a shared notification channel.

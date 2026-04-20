@@ -403,7 +403,10 @@ async def notify_node(state: AgentState) -> dict:
 
     try:
         if profile.notification_channel == "telegram":
-            await send_alert(alert, profile)
+            # If registered via the bot, route to the user's own chat.
+            # Otherwise fall back to the TELEGRAM_CHAT_ID env var.
+            chat_id = profile.telegram_chat_id or None
+            await send_alert(alert, profile, chat_id=chat_id)
         else:
             # Unknown channel — log and mark sent so the pipeline does not stall.
             # Add new channel handlers here as the system grows.
