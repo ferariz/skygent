@@ -392,7 +392,8 @@ def save_conversation_state(
         updated_at=datetime.now(timezone.utc),
     )
     session.merge(row)
-    return row
+    # Do not return the row — merge() returns a new managed instance
+    # but the session closes after this call. Callers do not need the row.
 
 
 def clear_conversation_state(session: Session, chat_id: str) -> None:

@@ -288,15 +288,25 @@ def _load_state(chat_id: str) -> tuple[str, dict]:
     """
     Load conversation step and data for a chat.
     Returns (Step.IDLE, {}) if no state exists or state is expired.
+
+    All row attributes are read inside the session context to avoid
+    SQLAlchemy 'not bound to a Session' errors on lazy attribute access
+    after the session closes.
     """
     with get_session_sync() as session:
         row = get_conversation_state(session, chat_id)
+        if row is None:
+            return Step.IDLE, {}
 
-    if row is None:
-        return Step.IDLE, {}
+        # Read all attributes while session is open
+        step = row.step
+        data_str = row.data
+        updated_at = row.updated_at
 
-    # Check expiry
-    age = datetime.now(timezone.utc) - row.updated_at.replace(tzinfo=timezone.utc)
+    # Check expiry outside session — we have the values we need
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - updated_at
     if age > timedelta(hours=CONVERSATION_EXPIRY_HOURS):
         logger.info("bot: clearing expired conversation for chat %s", chat_id)
         with get_session_sync() as session:
@@ -304,11 +314,11 @@ def _load_state(chat_id: str) -> tuple[str, dict]:
         return Step.IDLE, {}
 
     try:
-        data = json.loads(row.data)
+        data = json.loads(data_str)
     except Exception:
         data = {}
 
-    return row.step, data
+    return step, data
 
 
 def _save_state(chat_id: str, step: str, data: dict) -> None:
@@ -705,22 +715,36 @@ def _patch_telegram_chat_id(profile_id: str, chat_id: str) -> None:
 
     This ensures notify_node routes future alerts to the correct user
     rather than the shared TELEGRAM_CHAT_ID env var.
+
+    Uses a retry loop because the API and bot share the same SQLite DB.
+    The API commits the profile row just before this is called — WAL mode
+    helps but a brief retry guards against any remaining sync delay.
     """
     from skygent.api.database import ProfileRow, get_session_sync
-    from skygent.core.models import MonitoringProfile
     import json
+    import time
 
-    with get_session_sync() as session:
-        row = session.get(ProfileRow, profile_id)
-        if row is None:
-            logger.warning("bot: profile %s not found for chat_id patch", profile_id)
-            return
-        # Deserialize, update, re-serialize
-        profile_data = json.loads(row.data)
-        profile_data["telegram_chat_id"] = chat_id
-        row.data = json.dumps(profile_data)
-        session.add(row)
-    logger.info("bot: patched telegram_chat_id=%s on profile %s", chat_id, profile_id)
+    for attempt in range(3):
+        with get_session_sync() as session:
+            row = session.get(ProfileRow, profile_id)
+            if row is not None:
+                profile_data = json.loads(row.data)
+                profile_data["telegram_chat_id"] = chat_id
+                row.data = json.dumps(profile_data)
+                session.add(row)
+                logger.info(
+                    "bot: patched telegram_chat_id=%s on profile %s",
+                    chat_id, profile_id,
+                )
+                return
+        # Row not visible yet — brief wait then retry
+        logger.debug("bot: profile %s not found on attempt %d, retrying", profile_id, attempt + 1)
+        time.sleep(0.5)
+
+    logger.warning(
+        "bot: could not patch telegram_chat_id for profile %s after 3 attempts",
+        profile_id,
+    )
 
 
 def handle_confirm(chat_id: str, callback_query: dict) -> None:
@@ -773,13 +797,32 @@ def handle_confirm(chat_id: str, callback_query: dict) -> None:
         )
 
         import asyncio
-        # The bot polling loop (bot.py) is synchronous — no running
-        # event loop on this thread, so asyncio.run() is always safe.
-        # If refactored to async in future: await fetch_forecast(profile)
-        snapshot = asyncio.run(fetch_forecast(profile))
-        narrative = _generate_welcome_narrative(profile, snapshot)
-        welcome = format_welcome_message(profile, snapshot, narrative)
-        send_message(chat_id, welcome)
+        from skygent.integrations.openmeteo import OpenMeteoError
+
+        horizon_days = (
+            profile.event_datetime - datetime.now(timezone.utc)
+        ).total_seconds() / 86400
+
+        if horizon_days > 16:
+            # Event is beyond the Open-Meteo forecast window — no data yet.
+            # Send a friendly explanation instead of attempting a doomed fetch.
+            send_message(
+                chat_id,
+                f"✅ <b>{_escape(profile.name)}</b> is now being monitored!\n\n"
+                f"📅 Your event is <b>{horizon_days:.0f} days away</b> — "
+                f"weather forecasts are only available up to 16 days out, "
+                f"so I don't have data yet.\n\n"
+                f"I'll check every <b>{profile.check_interval_hours}h</b> "
+                f"and send you the first forecast as soon as it becomes available "
+                f"(roughly {max(0, horizon_days - 16):.0f} days from now). "
+                f"I'll also alert you whenever the forecast changes significantly.",
+            )
+        else:
+            # Event is within forecast window — fetch and narrate
+            snapshot = asyncio.run(fetch_forecast(profile))
+            narrative = _generate_welcome_narrative(profile, snapshot)
+            welcome = format_welcome_message(profile, snapshot, narrative)
+            send_message(chat_id, welcome)
 
     except Exception as exc:
         logger.error("bot: welcome forecast failed: %s", exc)
