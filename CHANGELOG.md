@@ -1,0 +1,125 @@
+# Changelog
+
+All notable changes to Skygent are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+---
+
+## [0.1.0] — 2026-04-19
+
+First complete MVP. All seven steps implemented, tested, and live-demonstrated.
+
+### What it does
+
+Monitors weather forecasts for user-defined events. Polls Open-Meteo every
+N hours (default: 6), detects significant changes against the previous
+snapshot, and delivers a GPT-4o-mini-generated alert narrative via Telegram.
+Deterministic code makes all threshold and significance decisions; the LLM
+is called exactly once per alert cycle, only to write the message.
+
+Full pipeline demonstrated live: Open-Meteo (ECMWF IFS Best Match, 9 km) →
+diff engine → significance evaluator → GPT-4o-mini → Telegram delivery.
+
+### Added
+
+**Core layer (`skygent/core/`)**
+- `MonitoringProfile` — event configuration with per-variable thresholds,
+  context field (`social_event` | `agriculture` | `energy` | `logistics`),
+  and `event_duration_hours` documenting the hourly upgrade path
+- `ForecastSnapshot` — immutable forecast capture with `horizon_days` and
+  `model_used` (NWP model provenance per snapshot)
+- `DiffAnalyzer` — deterministic delta computation between snapshots;
+  `weather_code` excluded from numeric diff and evaluated categorically
+- `SignificanceEvaluator` — threshold rules, WMO severity rank table,
+  bidirectional weathercode alerts, horizon→confidence mapping
+
+**Open-Meteo integration (`skygent/integrations/openmeteo.py`)**
+- Async fetch with `timezone=UTC`, `start_date`/`end_date` params
+- Captures `response["model"]` → `ForecastSnapshot.model_used`
+  (defaults to `"best_match"` — Best Match endpoint does not expose
+  which NWP models it selected)
+- `JSONDecodeError` wrapped as `OpenMeteoError`
+- WARNING logged when target date exceeds forecast window
+
+**LangGraph agent (`skygent/agent/`)**
+- Five-node graph: `fetch_forecast → analyze_diff → evaluate_significance
+  → narrate → notify`
+- Lazy LLM init — `OPENAI_API_KEY` not required at import time
+- Stale state clearing — run N data never bleeds into run N+1
+- Nodes never raise — all exceptions caught and returned as `{"error": ...}`
+- LLM: OpenAI `gpt-4o-mini`, `max_tokens=400`
+
+**Scheduler (`skygent/scheduler/jobs.py`)**
+- `AsyncIOScheduler`, one job per profile, `max_instances=1`
+- `next_run_time=now()` on registration → immediate first fetch
+- `set_snapshot_store()` public setter for dependency injection
+- Per-profile error isolation at startup
+
+**FastAPI + database (`skygent/api/`)**
+- `POST/GET/DELETE /api/v1/profiles`, `GET /api/v1/alerts`,
+  `GET /api/v1/status`, `GET /health`
+- `ProfileRow`, `SnapshotRow` (with `model_used` column), `AlertRow`
+- `DBSnapshotStore` — DB-backed snapshot store, same interface as
+  in-memory store; swap-in at startup via `set_snapshot_store()`
+- `list_profiles(active_only=True)` filters by `event_datetime > now()`
+  AND `is_active=True` — prevents stale boolean bug
+- `deregister_snapshots()` — soft-delete with `deregistered_at` timestamp;
+  re-registered profiles start a fresh diff baseline
+- POST /profiles atomicity — scheduler failure rolls back DB write
+- `ProfileCreate.context` typed as `Literal[...]` for accurate OpenAPI schema
+
+**Telegram notifications (`skygent/integrations/telegram.py`)**
+- HTML parse mode (not MarkdownV2 — safer for LLM-generated text)
+- `TelegramError` wraps all failures including `JSONDecodeError`
+- HTML-safe truncation at 4096 char limit
+- `notify_node` routes on `profile.notification_channel`
+
+**Streamlit dashboard (`ui/app.py`)**
+- Register event with interactive map picker (streamlit-folium)
+- Active profiles with deregister button
+- Alert history with confidence badges and narrative display
+- Configurable API URL in sidebar
+
+**Documentation**
+- `README.md` — project overview, NWP data sources table, confidence
+  scoring basis, South America regional note, ensemble/ML roadmap
+- `docs/design.md` — architecture, all design decisions, test coverage,
+  portfolio-strengthening section, SQLite migration note
+- `LICENSE` — MIT
+
+### Test coverage
+
+204 unit tests, 3 integration tests (deselected by default).
+
+| File | Tests |
+|---|---|
+| `test_diff.py` | 20 |
+| `test_significance.py` | 34 |
+| `test_openmeteo.py` | 31 |
+| `test_agent.py` | 37 |
+| `test_scheduler.py` | 30 |
+| `test_api.py` | 42 |
+| `test_telegram.py` | 21 |
+
+### Known limitations
+
+- Daily aggregates only (not hourly event-window extraction) —
+  upgrade path documented via `event_duration_hours`
+- No high-resolution regional NWP model for South America —
+  relies on ECMWF IFS HRES (9 km) and GFS (25 km)
+- Confidence scoring is a horizon heuristic, not calibrated probabilities
+- SQLite only — no Alembic migrations; schema changes require DB deletion
+  in development or manual `ALTER TABLE` in production
+- Telegram bot is outbound only — profile registration via dashboard or API
+
+---
+
+## [Unreleased] — feat/telegram-bot-conversation
+
+### Planned
+
+- Inbound Telegram message handler (polling-based)
+- Conversation state machine: location pin → date → duration → context →
+  confirm → register
+- Welcome message on registration: initial forecast narrative via GPT-4o-mini
+- User-to-profile mapping: Telegram chat_id stored on `MonitoringProfile`

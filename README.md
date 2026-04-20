@@ -126,8 +126,8 @@ skygent/
 │   ├── test_openmeteo.py     # 30 tests
 │   ├── test_agent.py         # 37 tests
 │   ├── test_scheduler.py     # 29 tests
-│   ├── test_api.py           # 40 tests
-│   └── test_telegram.py      # 20 tests
+│   ├── test_api.py           # 42 tests
+│   └── test_telegram.py      # 21 tests
 ├── docs/
 │   └── design.md             # Architecture and design decisions
 ├── requirements.txt
@@ -186,7 +186,7 @@ pytest -m integration tests/test_agent.py -v
 pytest -m integration tests/test_telegram.py -v
 ```
 
-203 unit tests pass with zero external dependencies. 3 integration tests are deselected by default.
+204 unit tests pass with zero external dependencies. 3 integration tests are deselected by default.
 
 ---
 
