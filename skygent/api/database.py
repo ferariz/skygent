@@ -51,6 +51,8 @@ D. Unused imports removed: json and Optional were not used.
 
 from __future__ import annotations
 
+import json
+
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -72,11 +74,27 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = "sqlite:///skygent.db"
 
+def _set_wal_mode(dbapi_conn, connection_record):
+    """Enable WAL journal mode for better concurrent read/write performance.
+
+    Without WAL, concurrent reads from the bot process and writes from the
+    API process can cause 'database is locked' errors. WAL allows readers
+    and writers to operate simultaneously without blocking each other.
+    This is safe for SQLite and is the recommended mode for any multi-process
+    SQLite deployment.
+    """
+    dbapi_conn.execute("PRAGMA journal_mode=WAL")
+
+
 engine = create_engine(
     DATABASE_URL,
     echo=False,                    # set True to log SQL for debugging
     connect_args={"check_same_thread": False},  # required for SQLite + FastAPI
 )
+
+# Register WAL mode — fires once per new connection
+from sqlalchemy import event as sa_event
+sa_event.listen(engine, "connect", _set_wal_mode)
 
 
 def create_db_and_tables() -> None:
@@ -138,6 +156,43 @@ class AlertRow(SQLModel, table=True):
     profile_id: str = Field(index=True)
     detected_at: datetime             # for ORDER BY DESC
     data: str                         # JSON-serialized Alert (single source of truth)
+
+
+class ConversationStateRow(SQLModel, table=True):
+    """
+    Persisted conversation state for the Telegram bot registration flow.
+
+    Design decisions
+    ----------------
+    1. SQLite-backed over in-memory: conversation state survives bot restarts
+       and WatchFiles-triggered reloads during development. The cost is ~5
+       extra lines of DB code; the benefit is a reliable registration flow
+       even if the bot process restarts mid-conversation.
+
+    2. One row per chat_id: a user can only have one active conversation at
+       a time. If they start over, the row is overwritten via merge().
+
+    3. step field as a string enum: keeps the state machine readable in
+       the DB without needing a SQLAlchemy Enum type. Valid values are
+       defined in telegram_bot.py as Step class constants.
+
+    4. Partial data as JSON: lat, lon, name, context, duration accumulate
+       as the conversation progresses. Storing them as a JSON blob avoids
+       nullable columns for each field and matches the pattern used by
+       ProfileRow, SnapshotRow, and AlertRow.
+
+    5. updated_at for expiry: stale conversations (e.g. user abandoned
+       mid-flow 3 days ago) can be detected and cleaned up. The bot checks
+       updated_at and resets state if it is too old.
+    """
+    __tablename__ = "conversation_states"
+
+    chat_id: str = Field(primary_key=True)   # Telegram chat ID as string
+    step: str                                  # current Step class value (see telegram_bot.py)
+    data: str = Field(default="{}")           # JSON blob of accumulated inputs
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +364,43 @@ def list_alerts(
     stmt = stmt.order_by(AlertRow.detected_at.desc()).limit(limit)
     rows = session.exec(stmt).all()
     return [Alert.model_validate_json(r.data) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Conversation state CRUD helpers
+# ---------------------------------------------------------------------------
+
+def get_conversation_state(session: Session, chat_id: str) -> ConversationStateRow | None:
+    """Load conversation state for a Telegram chat, or None if not started."""
+    return session.get(ConversationStateRow, chat_id)
+
+
+def save_conversation_state(
+    session: Session,
+    chat_id: str,
+    step: str,
+    data: dict,
+) -> ConversationStateRow:
+    """
+    Upsert conversation state for a chat.
+    updated_at is always refreshed so stale conversations can be detected.
+    """
+    row = ConversationStateRow(
+        chat_id=chat_id,
+        step=step,
+        data=json.dumps(data),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.merge(row)
+    # Do not return the row — merge() returns a new managed instance
+    # but the session closes after this call. Callers do not need the row.
+
+
+def clear_conversation_state(session: Session, chat_id: str) -> None:
+    """Delete conversation state — called on registration or /cancel."""
+    row = session.get(ConversationStateRow, chat_id)
+    if row:
+        session.delete(row)
 
 
 # ---------------------------------------------------------------------------

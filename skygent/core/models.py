@@ -178,6 +178,13 @@ class MonitoringProfile(BaseModel):
 
     notification_channel: str = "telegram"
 
+    # Telegram chat ID of the user who registered this profile via the bot.
+    # None for profiles registered via the API or dashboard (which use the
+    # TELEGRAM_CHAT_ID env var as the delivery target instead).
+    # When set, notify_node routes alerts to this specific chat rather than
+    # the env var — enabling per-user alert delivery without a shared channel.
+    telegram_chat_id: str | None = None
+
     # Used by narrator node to tailor language. Does NOT affect thresholds.
     context: Literal["social_event", "agriculture", "energy", "logistics"] = "social_event"
 
@@ -257,11 +264,10 @@ class MonitoringProfile(BaseModel):
         """True while the event is still in the future."""
         event = self.event_datetime
         if event.tzinfo is None:
-            # Naive datetime — strip tzinfo for comparison.
-            # datetime.utcnow() was deprecated in 3.12; use utcfromtimestamp.
-            return datetime.utcfromtimestamp(
-                datetime.now(timezone.utc).timestamp()
-            ) < event
+            # Naive datetime — compare against naive UTC.
+            # .replace(tzinfo=None) strips tzinfo from the aware datetime
+            # cleanly without the unusual utcfromtimestamp() pattern.
+            return datetime.now(timezone.utc).replace(tzinfo=None) < event
         return datetime.now(timezone.utc) < event
 
 
