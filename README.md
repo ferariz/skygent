@@ -1,84 +1,184 @@
-# Skygent — AI Weather Monitoring Agent
+# Skygent — Decision Engine for Weather Change Detection
 
-Skygent watches weather forecasts for user-defined events and sends proactive alerts when conditions change significantly. Given a wedding, outdoor concert, or farm harvest window, it polls the forecast every few hours, detects meaningful changes, and delivers a natural-language summary that includes an honest estimate of forecast uncertainty.
+Skygent is a deterministic decision engine for detecting meaningful changes in numerical weather prediction systems.
 
-Built as a portfolio project for a senior AI/ML engineering role and as the technical foundation for a future B2B pivot into agriculture, logistics, and energy.
+It is based on a simple principle:
+
+> **Significant change is a mathematical concept — not a heuristic, and not something to delegate to an LLM.**
+
+Most weather applications continuously display forecast data.  
+Skygent does something different: it decides **when a forecast actually changed in a way that matters**, and communicates that change clearly. This problem becomes critical in domains like agriculture, energy, and logistics, where decisions depend on detecting meaningful changes early.
+
+---
+
+## Why this exists
+
+Modern numerical weather prediction (NWP) systems like ECMWF IFS produce extremely high-quality forecasts:
+- ~9 km spatial resolution  
+- global coverage  
+- updated every 6 hours  
+
+The problem is not the data.
+
+The problem is **attention**.
+
+Users don’t need more forecasts.  
+They need to know:
+- *Did something actually change?*
+- *Is it meaningful?*
+- *How confident should I be?*
+
+Skygent is built to answer exactly those questions.
+
+---
+
+## Core design principle
+
+Skygent follows a strict separation:
+
+> **Deterministic code owns decisions. LLMs own communication.**
+
+This leads to three non-negotiable rules:
+
+1. **All significance logic is deterministic and testable**
+2. **LLMs are never used to evaluate thresholds or make decisions**
+3. **LLMs are invoked only when there is information worth communicating**
+
+If you can write an `assert` for it, it does not belong in an LLM.
 
 ---
 
 ## How it works
 
-Every N hours (default: 6), the scheduler wakes up for each active event profile and runs a five-step pipeline:
+Every N hours (default: 6), Skygent evaluates each monitored event:
 
 ```
 fetch_forecast → analyze_diff → evaluate_significance → narrate → notify
 ```
 
-Most runs exit after `evaluate_significance` with no alert — the LLM is called only when a threshold is crossed. On a typical 6-hour cycle this means the model is invoked perhaps once or twice per week per profile, not on every poll.
 
-The core design principle is **hybrid intelligence**: deterministic code makes all threshold and significance decisions; the LLM is called exactly once per alert cycle, only to write the human-readable message.
+Most runs exit early:
+- No meaningful change → no alert → no LLM call
+
+In practice:
+- ~28 forecast polls per week  
+- ~1–2 LLM calls per week per profile  
+
+This is **event-driven AI**, not polling-based generation.
+
+---
+
+## What “significant change” means
+
+A change is not defined by raw deltas alone.
+
+Skygent evaluates:
+- Magnitude of change (e.g. precipitation probability shift)
+- Directionality (improvement vs deterioration)
+- Context (event sensitivity)
+- Forecast horizon
+
+This is closer to **regime change detection** than simple thresholding.
+
+---
+
+## Confidence is not a guess
+
+Skygent maps forecast horizon to a confidence label using known NWP skill limits:
+
+| Horizon | Confidence |
+|--------|------------|
+| ≤ 3 days | High |
+| 3–7 days | Medium |
+| > 7 days | Low |
+
+This reflects the known behavior of global NWP systems:
+- deterministic skill degrades with lead time  
+- uncertainty grows non-linearly  
+
+These are **physics-informed heuristics**, not calibrated probabilities.
 
 ---
 
 ## Forecast data sources
 
-Skygent uses [Open-Meteo](https://open-meteo.com/) (free, no API key required), which blends output from multiple national weather services into a single endpoint. For any given location, the API automatically selects the best available model — a strategy called **Best Match**.
+Skygent uses [Open-Meteo](https://open-meteo.com/), which aggregates multiple NWP models:
 
-### Contributing NWP models
+| Model | Provider | Resolution | Forecast |
+|------|--------|-----------|----------|
+| ECMWF IFS HRES | ECMWF | 9 km | 15 days |
+| GFS | NOAA | 12–25 km | 16 days |
+| ICON | DWD | 2–11 km | 7.5 days |
+| GEM | Environment Canada | 2.5–15 km | 10 days |
 
-| Model | Provider | Spatial resolution | Temporal resolution | Forecast length | Update cycle |
-|---|---|---|---|---|---|
-| ECMWF IFS HRES | ECMWF | 9 km (O1280 Gaussian grid) | 1-hourly (0–90 h), 3-hourly (90–144 h), 6-hourly (>144 h) | 15 days | Every 6 h |
-| ECMWF AIFS | ECMWF | ~28 km | 6-hourly | 15 days | Every 6 h |
-| NCEP GFS | NOAA | 0.11°–0.25° (~12–25 km) | 1-hourly | 16 days | Every hour |
-| DWD ICON | DWD (Germany) | 2–11 km | 1-hourly | 7.5 days | Every 3 h |
-| GEM | Environment Canada | 2.5–15 km | 1-hourly | 10 days | Every 6 h |
+For South America (e.g. Montevideo), forecasts are primarily driven by:
+- ECMWF IFS  
+- GFS  
 
-ECMWF transitioned to open data on 1 October 2025 (CC-BY 4.0 licence), giving Open-Meteo access to the full-resolution IFS HRES output at 9 km without additional delay.
-
-### What Skygent currently consumes
-
-We request **daily aggregates** via the `daily=` parameter: `precipitation_probability_max`, `temperature_2m_max`, `wind_speed_10m_max`, `weather_code`. These are computed by Open-Meteo by aggregating over the underlying 1-hourly or 3-hourly NWP output for each UTC calendar day.
-
-This is a deliberate MVP simplification. See [docs/design.md](docs/design.md) for the documented upgrade path to hourly event-window extraction using the `event_duration_hours` field already present on `MonitoringProfile`.
-
-### Confidence scoring and NWP skill horizon
-
-Skygent maps forecast horizon to a confidence label using established NWP skill thresholds:
-
-| Horizon | Confidence | Basis |
-|---|---|---|
-| ≤ 3 days | High | Deterministic NWP models are reliable at this range |
-| 3–7 days | Medium | Ensemble spread grows; synoptic-scale patterns are still captured but mesoscale detail degrades |
-| > 7 days | Low | Beyond the reliable deterministic NWP horizon; large-scale anomalies may be captured but specific event forecasts carry high uncertainty |
-
-These thresholds reflect the typical skill horizon of global NWP models like ECMWF IFS. They are not derived from Skygent's own verification and should be treated as heuristics, not calibrated probabilities.
-
-### Regional note for South America
-
-Open-Meteo does not currently include a high-resolution regional model for South America (unlike Europe, where ICON-D2 at 2 km or HARMONIE at 2 km are available, or North America, where HRRR at 3 km is available). For locations like Montevideo, Best Match relies primarily on **ECMWF IFS HRES (9 km)** and **NCEP GFS** as global models. The effective spatial resolution is therefore 9–25 km, which is adequate for synoptic-scale and daily aggregate variables but insufficient for resolving convective-scale events or terrain-induced phenomena.
-
-### Roadmap: ensemble uncertainty and ML
-
-The current confidence scoring is a deterministic rule (`horizon → label`). Two natural upgrades:
-
-1. **Ensemble spread from Open-Meteo's Ensemble API** — returns output from 50 ECMWF ENS members plus NCEP GEFS, giving a quantitative spread estimate per variable. This would replace the horizon heuristic with an actual probabilistic uncertainty estimate for each snapshot.
-
-2. **ML post-processing** — Model Output Statistics (MOS) or analog-based methods could be applied to the raw NWP output to produce calibrated probabilities, particularly for precipitation. This is a standard technique in operational meteorology that would fit naturally into the `analyze_diff` → `evaluate_significance` pipeline.
+This implies:
+- strong synoptic skill  
+- limited convective resolution  
 
 ---
 
-## Stack
+## Architecture
 
-| Component | Role |
-|---|---|
-| LangGraph + GPT-4o-mini (OpenAI) | Agent graph + LLM narrator |
-| Open-Meteo API | NWP forecast data — ECMWF IFS, GFS, and others |
-| FastAPI + SQLModel + SQLite | HTTP backend + persistence |
-| APScheduler | Polling scheduler |
-| Telegram Bot API | Alert delivery |
-| Streamlit | Dashboard |
-| Pydantic v2 | Data contracts throughout |
+Skygent implements a hybrid system:
+
+| Layer | Responsibility |
+|------|----------------|
+| Diff engine | Computes changes between forecast snapshots |
+| Significance evaluator | Applies deterministic rules |
+| State store | Tracks historical forecasts |
+| LLM narrator | Converts structured alerts into natural language |
+| Delivery | Sends alerts (Telegram, API, UI) |
+
+The LLM is **never in the critical path of decision-making**.
+
+---
+
+## Example behavior
+
+Instead of:
+
+> “Forecast updated: chance of rain is now 40%”
+
+Skygent produces:
+
+> “Rain risk for your event increased from low to moderate (20% → 45%).  
+Confidence is medium due to forecast horizon (~5 days).  
+Conditions have deteriorated compared to the previous forecast.”
+
+---
+
+## Economics of the design
+
+Naive agent:
+- LLM call every poll → ~28 calls/week  
+
+Skygent:
+- LLM call only on change → ~1–2 calls/week  
+
+Result:
+- **~90%+ reduction in token usage**
+- deterministic testability  
+- full auditability  
+
+---
+
+## When this pattern breaks
+
+This approach does not apply when:
+- input is unstructured  
+- decision boundaries are ambiguous  
+- reasoning is open-ended  
+
+In those cases:
+- ReAct  
+- Plan-and-Execute  
+- LLM-first systems  
+
+Skygent is intentionally **not that system**.
 
 ---
 
@@ -133,6 +233,7 @@ skygent/
 ├── requirements.txt
 └── pytest.ini
 ```
+
 
 ---
 
@@ -212,6 +313,27 @@ print(state["current_snapshot"].data)
 
 ---
 
+## Real alert example
+
+**Previous forecast**
+- Precipitation probability: 20%
+- Confidence: Medium (5-day horizon)
+
+**New forecast**
+- Precipitation probability: 45%
+- Confidence: Medium
+
+**Detected change**
+- +25pp increase in precipitation probability
+- Threshold exceeded → alert triggered
+
+**Generated alert**
+> Rain risk for your event increased significantly (20% → 45%).  
+> Confidence remains medium due to forecast horizon (~5 days).  
+> Conditions have deteriorated compared to the previous forecast.
+
+---
+
 ## Design documentation
 
 Architecture decisions, tradeoffs, and the rationale behind non-obvious choices are documented in [`docs/design.md`](docs/design.md).
@@ -227,3 +349,6 @@ Architecture decisions, tradeoffs, and the rationale behind non-obvious choices 
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+Note: This repository is open for learning and experimentation.
+Commercial deployments may be subject to additional licensing in the future.
