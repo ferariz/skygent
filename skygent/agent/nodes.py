@@ -69,7 +69,15 @@ has an unambiguous, parseable input rather than a prose description.
 from __future__ import annotations
 
 import json
+import logging
 import structlog
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -113,6 +121,23 @@ def _get_llm() -> ChatOpenAI:
 
 
 # ---------------------------------------------------------------------------
+# Retry logic for Open-Meteo fetches
+# ---------------------------------------------------------------------------
+
+_openmeteo_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(OpenMeteoError),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+
+
+async def _fetch_with_retry(profile):
+    return await _openmeteo_retry(fetch_forecast)(profile)
+
+
+# ---------------------------------------------------------------------------
 # Node: fetch_forecast
 # ---------------------------------------------------------------------------
 
@@ -136,7 +161,7 @@ async def fetch_forecast_node(state: AgentState) -> dict:
     log.info("fetch_forecast: starting")
 
     try:
-        snapshot = await fetch_forecast(profile)
+        snapshot = await _fetch_with_retry(profile)
     except OpenMeteoError as exc:
         log.error("fetch_forecast: API error", error=str(exc))
         return {"error": f"fetch_forecast failed: {exc}"}
