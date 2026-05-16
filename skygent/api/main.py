@@ -56,10 +56,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from skygent.api.database import (
     DBSnapshotStore,
     create_db_and_tables,
+    engine,
     get_session_sync,
     list_profiles,
 )
@@ -87,6 +89,11 @@ async def lifespan(app: FastAPI):
     """
     logger.info("startup: initializing database")
     create_db_and_tables()
+
+    with engine.connect() as conn:
+        result = conn.execute(text("PRAGMA journal_mode=WAL"))
+        logger.info("startup: WAL mode active (journal_mode=%s)", result.scalar())
+        conn.execute(text("PRAGMA synchronous=NORMAL"))
 
     logger.info("startup: injecting DB-backed snapshot store")
     set_snapshot_store(DBSnapshotStore())  # fix C: public setter, not _attr mutation
