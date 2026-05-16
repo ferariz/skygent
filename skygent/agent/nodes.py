@@ -137,6 +137,15 @@ async def _fetch_with_retry(profile):
     return await _openmeteo_retry(fetch_forecast)(profile)
 
 
+_llm_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception_type(Exception),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+
+
 # ---------------------------------------------------------------------------
 # Node: fetch_forecast
 # ---------------------------------------------------------------------------
@@ -358,6 +367,30 @@ def _build_narrate_prompt(state: AgentState) -> str:
     return json.dumps(payload, indent=2, default=str)
 
 
+def _build_fallback_narrative(profile, alert) -> str:
+    """Assemble a plain-text narrative from structured data only — no LLM call."""
+    try:
+        confidence_meaning = {
+            "high":   "forecast is reliable (≤3 days out)",
+            "medium": "forecast has moderate uncertainty (3–7 days out)",
+            "low":    "forecast has high uncertainty (>7 days out)",
+        }
+        date_str = profile.event_datetime.strftime("%Y-%m-%d")
+        parts = [f"Forecast change detected for {profile.name} ({date_str})."]
+        for var, info in alert.changes.items():
+            from_val = round(info["from_value"], 1)
+            to_val = round(info["to_value"], 1)
+            delta = round(info["delta"], 1)
+            sign = "+" if delta >= 0 else ""
+            parts.append(f"{var} shifted from {from_val} to {to_val} (delta: {sign}{delta}).")
+        meaning = confidence_meaning.get(alert.confidence, alert.confidence)
+        parts.append(f"Confidence: {alert.confidence} ({meaning}).")
+        parts.append(f"Next check in {profile.check_interval_hours} hours.")
+        return " ".join(parts)
+    except Exception:
+        return f"Forecast change detected for {profile.name}. Check your monitoring dashboard for details."
+
+
 async def narrate_node(state: AgentState) -> dict:
     """
     Call Claude to generate a human-readable narrative for the alert.
@@ -382,11 +415,12 @@ async def narrate_node(state: AgentState) -> dict:
             SystemMessage(content=_SYSTEM_PROMPT),
             HumanMessage(content=_build_narrate_prompt(state)),
         ]
-        response = await llm.ainvoke(messages)
+        response = await _llm_retry(llm.ainvoke)(messages)
         narrative = response.content.strip()
     except Exception as exc:
-        log.error("narrate: LLM error", error=str(exc))
-        return {"error": f"narrate LLM error: {exc}"}
+        fallback = _build_fallback_narrative(profile, alert)
+        log.warning("narrate: LLM failed after retries — using fallback narrative", error=str(exc))
+        return {"alert": alert.model_copy(update={"narrative": fallback})}
 
     alert_with_narrative = alert.model_copy(update={"narrative": narrative})
 
