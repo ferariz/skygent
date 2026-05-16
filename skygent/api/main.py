@@ -53,7 +53,10 @@ Run locally:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+
+import structlog
 
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -68,12 +71,55 @@ from skygent.api.database import (
 from skygent.api.routes import router
 from skygent.scheduler.jobs import register_profile, set_snapshot_store, shutdown, start
 
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-)
+def configure_logging() -> None:
+    env = os.getenv("ENV", "development")
+
+    shared_processors = [
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+    ]
+
+    renderer = (
+        structlog.processors.JSONRenderer()
+        if env == "production"
+        else structlog.dev.ConsoleRenderer()
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            renderer,
+        ],
+        foreign_pre_chain=shared_processors,
+    )
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+
+    structlog.configure(
+        processors=shared_processors + [
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+
+logger = logging.getLogger(__name__)
+configure_logging()
 
 
 # ---------------------------------------------------------------------------

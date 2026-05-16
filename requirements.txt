@@ -12,6 +12,7 @@ langchain-core>=0.3
 fastapi>=0.100
 sqlmodel>=0.0.18
 uvicorn[standard]>=0.20
+structlog>=21.2
  
 # Scheduler
 apscheduler>=3.10,<4.0
