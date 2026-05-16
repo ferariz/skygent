@@ -57,6 +57,7 @@ import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Generator
+from uuid import uuid4
 
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -193,6 +194,27 @@ class ConversationStateRow(SQLModel, table=True):
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
+
+class PollRun(SQLModel, table=True):
+    """
+    One scheduler tick record — written after every _job_for_profile execution.
+
+    status is one of "ok", "error", "skipped".
+    changes_detected is None when the run exited before diffing (first run,
+    error, or skipped). duration_ms covers the full job wall time.
+    """
+    __tablename__ = "poll_runs"
+
+    id: str = Field(default_factory=lambda: uuid4().hex, primary_key=True)
+    profile_id: str = Field(index=True)
+    ran_at: datetime
+    status: str
+    changes_detected: int | None = Field(default=None)
+    alert_sent: bool = Field(default=False)
+    alert_id: str | None = Field(default=None)
+    error_message: str | None = Field(default=None)
+    duration_ms: int | None = Field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +423,24 @@ def clear_conversation_state(session: Session, chat_id: str) -> None:
     row = session.get(ConversationStateRow, chat_id)
     if row:
         session.delete(row)
+
+
+# ---------------------------------------------------------------------------
+# Poll run CRUD helpers
+# ---------------------------------------------------------------------------
+
+def create_poll_run(session: Session, poll_run: PollRun) -> PollRun:
+    """Persist a PollRun row and return the committed object."""
+    session.add(poll_run)
+    session.commit()
+    session.refresh(poll_run)
+    return poll_run
+
+
+def get_recent_poll_runs(session: Session, limit: int = 20) -> list[PollRun]:
+    """Return the most recent poll runs ordered by ran_at descending."""
+    stmt = select(PollRun).order_by(PollRun.ran_at.desc()).limit(limit)
+    return list(session.exec(stmt).all())
 
 
 # ---------------------------------------------------------------------------
