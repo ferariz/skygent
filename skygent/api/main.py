@@ -65,11 +65,19 @@ from skygent.api.database import (
     DBSnapshotStore,
     create_db_and_tables,
     engine,
+    get_recent_poll_runs,
     get_session_sync,
     list_profiles,
 )
 from skygent.api.routes import router
-from skygent.scheduler.jobs import register_profile, set_snapshot_store, shutdown, start
+from skygent.scheduler.jobs import (
+    is_scheduler_running,
+    list_jobs,
+    register_profile,
+    set_snapshot_store,
+    shutdown,
+    start,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -202,4 +210,30 @@ app.include_router(router, prefix="/api/v1")
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    try:
+        db_ok = False
+        last_poll_ran_at = None
+        last_poll_status = None
+        try:
+            with get_session_sync() as session:
+                runs = get_recent_poll_runs(session, limit=1)
+            if runs:
+                last_poll_ran_at = runs[0].ran_at.isoformat()
+                last_poll_status = runs[0].status
+            db_ok = True
+        except Exception:
+            pass
+
+        scheduler_running = is_scheduler_running()
+        status = "ok" if (db_ok and scheduler_running) else "degraded"
+
+        return {
+            "status": status,
+            "scheduler_running": scheduler_running,
+            "scheduled_jobs": len(list_jobs()),
+            "last_poll_ran_at": last_poll_ran_at,
+            "last_poll_status": last_poll_status,
+            "db_ok": db_ok,
+        }
+    except Exception as exc:
+        return {"status": "degraded", "error": str(exc)}

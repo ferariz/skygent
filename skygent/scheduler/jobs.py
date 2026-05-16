@@ -374,3 +374,9 @@ def shutdown(wait: bool = True) -> None:
 def get_snapshot_store() -> SnapshotStore:
     """Return the module-level snapshot store (injectable for tests)."""
     return _snapshot_store
+
+
+def is_scheduler_running() -> bool:
+    """Return whether the scheduler is currently running."""
+    return _scheduler.running
+
