@@ -41,7 +41,7 @@ Design decisions
 
 from __future__ import annotations
 
-import logging
+import structlog
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -50,7 +50,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from skygent.agent.graph import run_agent
 from skygent.core.models import ForecastSnapshot, MonitoringProfile
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +82,9 @@ class SnapshotStore:
         """Store or replace the snapshot for its profile."""
         self._store[snapshot.profile_id] = snapshot
         logger.debug(
-            "SnapshotStore: saved snapshot %s for profile %s",
-            snapshot.id, snapshot.profile_id,
+            "SnapshotStore: saved snapshot",
+            snapshot_id=str(snapshot.id),
+            profile_id=str(snapshot.profile_id),
         )
 
     def clear(self, profile_id: str) -> None:
@@ -117,7 +118,7 @@ def set_snapshot_store(store: SnapshotStore) -> None:
     """
     global _snapshot_store
     _snapshot_store = store
-    logger.info("scheduler: snapshot store replaced with %s", type(store).__name__)
+    logger.info("scheduler: snapshot store replaced", store_type=type(store).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -144,32 +145,37 @@ async def _job_for_profile(profile: MonitoringProfile) -> None:
        generally keeps the schedule running, but explicit catching ensures
        structured logging and predictable behavior across all backends.
     """
+    log = logger.bind(profile_name=profile.name, profile_id=str(profile.id))
     profile_id = profile.id
 
     # Guard: remove expired profiles rather than running forever.
     # Also clear the snapshot store so stale data does not persist in memory
     # until the next restart or manual deregistration.
     if not profile.is_active:
-        logger.info(
-            "scheduler: profile '%s' has passed its event date — removing job and clearing snapshot",
-            profile.name,
+        log.info(
+            "scheduler: profile has passed its event date — removing job and clearing snapshot",
+            job_id=_job_id(str(profile_id)),
         )
         _remove_job(profile_id)
         _snapshot_store.clear(profile_id)
         return
 
-    logger.info("scheduler: starting run for '%s'", profile.name)
     run_start = datetime.now(timezone.utc)
-
     previous_snapshot = _snapshot_store.get(profile_id)
+
+    log.info(
+        "scheduler: starting run",
+        previous_snapshot_id=str(previous_snapshot.id) if previous_snapshot is not None else "none",
+    )
 
     try:
         final_state = await run_agent(profile, previous_snapshot=previous_snapshot)
     except Exception as exc:
         # run_agent should never raise — belt-and-suspenders catch for safety
-        logger.error(
-            "scheduler: unexpected exception in run_agent for '%s': %s",
-            profile.name, exc, exc_info=True,
+        log.error(
+            "scheduler: unexpected exception in run_agent",
+            error=str(exc),
+            exc_info=True,
         )
         return
 
@@ -180,26 +186,24 @@ async def _job_for_profile(profile: MonitoringProfile) -> None:
 
     # Log the outcome
     if final_state.get("error"):
-        logger.error(
-            "scheduler: run for '%s' completed with error: %s",
-            profile.name, final_state["error"],
+        log.error(
+            "scheduler: run completed with error",
+            error=final_state["error"],
         )
     elif final_state.get("significant"):
         alert = final_state.get("alert")
-        logger.info(
-            "scheduler: alert generated for '%s' — id=%s, confidence=%s, "
-            "horizon=%.1f days, sent=%s",
-            profile.name,
-            alert.id if alert else "unknown",
-            alert.confidence if alert else "unknown",
-            alert.horizon_days if alert else 0.0,
-            alert.sent if alert else False,
+        log.info(
+            "scheduler: alert generated",
+            alert_id=str(alert.id) if alert else "unknown",
+            confidence=alert.confidence if alert else "unknown",
+            horizon_days=alert.horizon_days if alert else 0.0,
+            sent=alert.sent if alert else False,
         )
     else:
         elapsed = (datetime.now(timezone.utc) - run_start).total_seconds()
-        logger.info(
-            "scheduler: no significant change for '%s' (%.2fs)",
-            profile.name, elapsed,
+        log.info(
+            "scheduler: no significant change",
+            duration_ms=int(elapsed * 1000),
         )
 
 
@@ -213,7 +217,7 @@ def _remove_job(profile_id: str) -> None:
     job_id = _job_id(profile_id)
     if _scheduler.get_job(job_id):
         _scheduler.remove_job(job_id)
-        logger.info("scheduler: removed job for profile %s", profile_id)
+        logger.info("scheduler: removed job", profile_id=profile_id)
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +242,9 @@ def register_profile(profile: MonitoringProfile) -> bool:
     """
     if not profile.is_active:
         logger.warning(
-            "scheduler: profile '%s' is already past its event date — not scheduling",
-            profile.name,
+            "scheduler: profile is already past its event date — not scheduling",
+            profile_name=profile.name,
+            profile_id=str(profile.id),
         )
         return False
 
@@ -248,7 +253,7 @@ def register_profile(profile: MonitoringProfile) -> bool:
     # Replace existing job if present (idempotent re-registration)
     if _scheduler.get_job(job_id):
         _scheduler.remove_job(job_id)
-        logger.info("scheduler: replacing existing job for '%s'", profile.name)
+        logger.info("scheduler: replacing existing job", profile_name=profile.name)
 
     _scheduler.add_job(
         func=_job_for_profile,
@@ -265,8 +270,10 @@ def register_profile(profile: MonitoringProfile) -> bool:
     )
 
     logger.info(
-        "scheduler: registered '%s' — interval=%dh, first run immediate",
-        profile.name, profile.check_interval_hours,
+        "scheduler: registered profile — first run immediate",
+        profile_name=profile.name,
+        profile_id=str(profile.id),
+        interval_hours=profile.check_interval_hours,
     )
     return True
 
@@ -279,7 +286,7 @@ def deregister_profile(profile_id: str) -> None:
     """
     _remove_job(profile_id)
     _snapshot_store.clear(profile_id)
-    logger.info("scheduler: deregistered profile %s", profile_id)
+    logger.info("scheduler: deregistered profile", profile_id=profile_id)
 
 
 def list_jobs() -> list[dict]:
