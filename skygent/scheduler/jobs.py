@@ -48,6 +48,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from skygent.agent.graph import run_agent
+from skygent.api.database import PollRun, create_poll_run, get_session_sync
 from skygent.core.models import ForecastSnapshot, MonitoringProfile
 
 logger = structlog.get_logger()
@@ -148,6 +149,12 @@ async def _job_for_profile(profile: MonitoringProfile) -> None:
     log = logger.bind(profile_name=profile.name, profile_id=str(profile.id))
     profile_id = profile.id
 
+    status: str = "skipped"
+    changes_detected: int | None = None
+    alert_sent: bool = False
+    alert_id: str | None = None
+    error_message: str | None = None
+
     # Guard: remove expired profiles rather than running forever.
     # Also clear the snapshot store so stale data does not persist in memory
     # until the next restart or manual deregistration.
@@ -161,50 +168,76 @@ async def _job_for_profile(profile: MonitoringProfile) -> None:
         return
 
     run_start = datetime.now(timezone.utc)
-    previous_snapshot = _snapshot_store.get(profile_id)
-
-    log.info(
-        "scheduler: starting run",
-        previous_snapshot_id=str(previous_snapshot.id) if previous_snapshot is not None else "none",
-    )
-
     try:
-        final_state = await run_agent(profile, previous_snapshot=previous_snapshot)
-    except Exception as exc:
-        # run_agent should never raise — belt-and-suspenders catch for safety
-        log.error(
-            "scheduler: unexpected exception in run_agent",
-            error=str(exc),
-            exc_info=True,
-        )
-        return
+        previous_snapshot = _snapshot_store.get(profile_id)
 
-    # Persist the current snapshot regardless of whether an alert fired
-    current_snapshot = final_state.get("current_snapshot")
-    if current_snapshot is not None:
-        _snapshot_store.set(current_snapshot)
+        log.info(
+            "scheduler: starting run",
+            previous_snapshot_id=str(previous_snapshot.id) if previous_snapshot is not None else "none",
+        )
 
-    # Log the outcome
-    if final_state.get("error"):
-        log.error(
-            "scheduler: run completed with error",
-            error=final_state["error"],
+        try:
+            final_state = await run_agent(profile, previous_snapshot=previous_snapshot)
+        except Exception as exc:
+            # run_agent should never raise — belt-and-suspenders catch for safety
+            log.error(
+                "scheduler: unexpected exception in run_agent",
+                error=str(exc),
+                exc_info=True,
+            )
+            return
+
+        # Persist the current snapshot regardless of whether an alert fired
+        current_snapshot = final_state.get("current_snapshot")
+        if current_snapshot is not None:
+            _snapshot_store.set(current_snapshot)
+
+        # Log the outcome
+        if final_state.get("error"):
+            status = "error"
+            error_message = final_state["error"]
+            log.error(
+                "scheduler: run completed with error",
+                error=final_state["error"],
+            )
+        elif final_state.get("significant"):
+            alert = final_state.get("alert")
+            status = "ok"
+            alert_sent = alert.sent if alert else False
+            alert_id = str(alert.id) if alert else None
+            changes_detected = len(final_state.get("changes") or {})
+            log.info(
+                "scheduler: alert generated",
+                alert_id=str(alert.id) if alert else "unknown",
+                confidence=alert.confidence if alert else "unknown",
+                horizon_days=alert.horizon_days if alert else 0.0,
+                sent=alert.sent if alert else False,
+            )
+        else:
+            status = "skipped"
+            changes_detected = len(final_state.get("changes") or {})
+            elapsed = (datetime.now(timezone.utc) - run_start).total_seconds()
+            log.info(
+                "scheduler: no significant change",
+                duration_ms=int(elapsed * 1000),
+            )
+    finally:
+        duration_ms = int((datetime.now(timezone.utc) - run_start).total_seconds() * 1000)
+        poll_run = PollRun(
+            profile_id=str(profile.id),
+            ran_at=run_start,
+            status=status,
+            changes_detected=changes_detected,
+            alert_sent=alert_sent,
+            alert_id=alert_id,
+            error_message=error_message,
+            duration_ms=duration_ms,
         )
-    elif final_state.get("significant"):
-        alert = final_state.get("alert")
-        log.info(
-            "scheduler: alert generated",
-            alert_id=str(alert.id) if alert else "unknown",
-            confidence=alert.confidence if alert else "unknown",
-            horizon_days=alert.horizon_days if alert else 0.0,
-            sent=alert.sent if alert else False,
-        )
-    else:
-        elapsed = (datetime.now(timezone.utc) - run_start).total_seconds()
-        log.info(
-            "scheduler: no significant change",
-            duration_ms=int(elapsed * 1000),
-        )
+        try:
+            with get_session_sync() as session:
+                create_poll_run(session, poll_run)
+        except Exception as exc:
+            log.error("scheduler: failed to write PollRun", error=str(exc))
 
 
 def _job_id(profile_id: str) -> str:
