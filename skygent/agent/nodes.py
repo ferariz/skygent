@@ -69,7 +69,7 @@ has an unambiguous, parseable input rather than a prose description.
 from __future__ import annotations
 
 import json
-import logging
+import structlog
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -81,7 +81,7 @@ from skygent.core.significance import SignificanceEvaluator
 from skygent.integrations.openmeteo import OpenMeteoError, fetch_forecast
 from skygent.integrations.telegram import TelegramError, send_alert
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
 # Module-level singletons — stateless, no credentials, safe at import time
@@ -132,15 +132,16 @@ async def fetch_forecast_node(state: AgentState) -> dict:
                            {error} on failure.
     """
     profile = state["profile"]
-    logger.info("fetch_forecast: starting for profile '%s'", profile.name)
+    log = logger.bind(profile_name=profile.name, profile_id=str(profile.id))
+    log.info("fetch_forecast: starting")
 
     try:
         snapshot = await fetch_forecast(profile)
     except OpenMeteoError as exc:
-        logger.error("fetch_forecast: API error for '%s': %s", profile.name, exc)
+        log.error("fetch_forecast: API error", error=str(exc))
         return {"error": f"fetch_forecast failed: {exc}"}
     except Exception as exc:
-        logger.error("fetch_forecast: unexpected error for '%s': %s", profile.name, exc)
+        log.error("fetch_forecast: unexpected error", error=str(exc))
         return {"error": f"fetch_forecast unexpected error: {exc}"}
 
     previous = state.get("previous_snapshot")
@@ -156,15 +157,13 @@ async def fetch_forecast_node(state: AgentState) -> dict:
     }
 
     if previous is None:
-        logger.info(
-            "fetch_forecast: first run for '%s' — storing snapshot, no diff possible",
-            profile.name,
-        )
+        log.info("fetch_forecast: first run — storing snapshot, no diff possible")
         return {**cleared, "current_snapshot": snapshot, "significant": False}
 
-    logger.info(
-        "fetch_forecast: snapshot %s fetched (horizon=%.2f days)",
-        snapshot.id, snapshot.horizon_days,
+    log.info(
+        "fetch_forecast: snapshot fetched",
+        snapshot_id=str(snapshot.id),
+        horizon_days=round(snapshot.horizon_days, 2),
     )
     return {**cleared, "current_snapshot": snapshot}
 
@@ -189,20 +188,18 @@ async def analyze_diff_node(state: AgentState) -> dict:
     if previous is None or current is None:
         return {"error": "analyze_diff: missing snapshot(s) in state"}
 
-    logger.info("analyze_diff: comparing snapshots for '%s'", profile.name)
+    log = logger.bind(profile_name=profile.name)
+    log.info("analyze_diff: comparing snapshots")
 
     try:
         changes = _diff_analyzer.compare(previous, current, profile)
     except ValueError as exc:
         return {"error": f"analyze_diff: incompatible snapshots — {exc}"}
     except Exception as exc:
-        logger.error("analyze_diff: unexpected error: %s", exc)
+        log.error("analyze_diff: unexpected error", error=str(exc))
         return {"error": f"analyze_diff unexpected error: {exc}"}
 
-    logger.info(
-        "analyze_diff: %d variable(s) diffed for '%s'",
-        len(changes), profile.name,
-    )
+    log.info("analyze_diff: result", variables_diffed=len(changes))
 
     # Clear downstream fields so they reflect this run only
     return {
@@ -237,6 +234,8 @@ async def evaluate_significance_node(state: AgentState) -> dict:
     if previous is None or current is None:
         return {"error": "evaluate_significance: missing snapshot(s) in state"}
 
+    log = logger.bind(profile_name=profile.name)
+
     try:
         significant, triggers = _significance_evaluator.is_significant(
             changes=changes,
@@ -245,12 +244,13 @@ async def evaluate_significance_node(state: AgentState) -> dict:
             previous_snapshot=previous,
         )
     except Exception as exc:
-        logger.error("evaluate_significance: unexpected error: %s", exc)
+        log.error("evaluate_significance: unexpected error", error=str(exc))
         return {"error": f"evaluate_significance unexpected error: {exc}"}
 
-    logger.info(
-        "evaluate_significance: significant=%s, triggers=%s for '%s'",
-        significant, triggers, profile.name,
+    log.info(
+        "evaluate_significance: result",
+        significant=significant,
+        triggers=triggers,
     )
 
     if not significant:
@@ -348,7 +348,8 @@ async def narrate_node(state: AgentState) -> dict:
         return {"error": "narrate: no alert in state"}
 
     profile = state["profile"]
-    logger.info("narrate: generating narrative for '%s'", profile.name)
+    log = logger.bind(profile_name=profile.name)
+    log.info("narrate: generating narrative")
 
     try:
         llm = _get_llm()
@@ -359,14 +360,15 @@ async def narrate_node(state: AgentState) -> dict:
         response = await llm.ainvoke(messages)
         narrative = response.content.strip()
     except Exception as exc:
-        logger.error("narrate: LLM error: %s", exc)
+        log.error("narrate: LLM error", error=str(exc))
         return {"error": f"narrate LLM error: {exc}"}
 
     alert_with_narrative = alert.model_copy(update={"narrative": narrative})
 
-    logger.info(
-        "narrate: narrative generated (%d chars) for '%s'",
-        len(narrative), profile.name,
+    log.info(
+        "narrate: narrative generated",
+        narrative_chars=len(narrative),
+        model="gpt-4o-mini",
     )
     return {"alert": alert_with_narrative}
 
@@ -396,37 +398,40 @@ async def notify_node(state: AgentState) -> dict:
     if not alert.narrative:
         return {"error": "notify: alert has no narrative — narrate node must run first"}
 
-    logger.info(
-        "notify: delivering alert %s for '%s' via %s",
-        alert.id, profile.name, profile.notification_channel,
+    chat_id = profile.telegram_chat_id or None
+    log = logger.bind(profile_name=profile.name, alert_id=str(alert.id))
+
+    log.info(
+        "notify: delivering alert",
+        channel=profile.notification_channel,
+        chat_id=chat_id,
     )
 
     try:
         if profile.notification_channel == "telegram":
             # If registered via the bot, route to the user's own chat.
             # Otherwise fall back to the TELEGRAM_CHAT_ID env var.
-            chat_id = profile.telegram_chat_id or None
             await send_alert(alert, profile, chat_id=chat_id)
         else:
             # Unknown channel — log and mark sent so the pipeline does not stall.
             # Add new channel handlers here as the system grows.
-            logger.warning(
-                "notify: unknown channel '%s' for profile '%s' — "
-                "logging alert and marking as sent",
-                profile.notification_channel, profile.name,
+            log.warning(
+                "notify: unknown channel — logging alert and marking as sent",
+                channel=profile.notification_channel,
             )
-            logger.info(
+            log.info(
                 "\n%s\n[ALERT — %s]\n%s\nConfidence: %s | Horizon: %.1f days\n%s\n",
                 "=" * 60, profile.name, alert.narrative,
                 alert.confidence, alert.horizon_days, "=" * 60,
             )
     except TelegramError as exc:
-        logger.error("notify: Telegram delivery failed for '%s': %s", profile.name, exc)
+        log.error("notify: Telegram delivery failed", error=str(exc))
         return {"error": f"notify Telegram error: {exc}"}
     except Exception as exc:
-        logger.error("notify: unexpected error for '%s': %s", profile.name, exc)
+        log.error("notify: unexpected error", error=str(exc))
         return {"error": f"notify unexpected error: {exc}"}
 
     alert_sent = alert.model_copy(update={"sent": True})
-    logger.info("notify: alert %s marked as sent", alert.id)
+    log.info("notify: alert marked as sent")
     return {"alert": alert_sent}
+
