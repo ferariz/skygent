@@ -20,3 +20,5 @@ venv/
 .DS_Store
 skygent.db
 skygent.db
+*.db-shm
+*.db-wal
