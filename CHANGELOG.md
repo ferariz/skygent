@@ -5,6 +5,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-05-17
+
+Session 1 hardening: observability, resilience, and audit trail.
+
+### Added
+
+- **WAL mode** — SQLite WAL journal mode enabled on startup for safe
+  concurrent reads from the Streamlit dashboard alongside API writes
+- **structlog** — native structured logging across all modules
+  (`skygent/agent/nodes.py`, `skygent/scheduler/jobs.py`); key-value
+  fields on every log call; JSON renderer in production, console renderer
+  in development; `before_sleep_log` wired to tenacity retry hooks
+- **Tenacity retries on Open-Meteo** — `_openmeteo_retry` decorator with
+  `stop_after_attempt(3)`, `wait_exponential(min=2, max=10)`,
+  `retry_if_exception_type(OpenMeteoError)`, `reraise=True`
+- **Tenacity retries on GPT** — `_llm_retry` decorator with
+  `stop_after_attempt(3)`, `wait_exponential(min=1, max=8)`,
+  `retry_if_exception_type(Exception)`, `reraise=True`
+- **Fallback narrative** — `_build_fallback_narrative(profile, alert)`
+  assembles a plain-text summary from structured data when the LLM is
+  unavailable after all retries; alert is always delivered
+- **`PollRun` audit table** — SQLModel table recording every scheduler
+  tick: `profile_id`, `ran_at`, `status` (`ok` | `error` | `skipped`),
+  `changes_detected`, `alert_sent`, `alert_id`, `error_message`,
+  `duration_ms`; written in a `finally` block so DB write never crashes
+  the scheduler job
+- **Real `/health` endpoint** — returns `status`, `scheduler_running`,
+  `scheduled_jobs`, `last_poll_ran_at`, `last_poll_status`, `db_ok`;
+  `status` is `"degraded"` when DB or scheduler is unhealthy; entire
+  body wrapped in `try/except` so the endpoint never raises a 500
+- **Poll History Streamlit panel** — new "Poll History" page in the
+  dashboard; queries last 50 `PollRun` rows; displays full-width
+  dataframe with human-readable column labels; shows Total runs, Alerts
+  sent, and Error rate metrics below the table
+- **`CONTRIBUTING.md`** — contribution guidelines
+- **`docs/architecture.md`** — architecture reference document
+
+### Changed
+
+- Four test assertions updated to reflect new behavior:
+  `test_llm_failure_returns_error` now asserts fallback alert is returned
+  instead of an error dict; `test_marks_alert_as_sent` and
+  `test_significant_change_produces_sent_alert` mock `send_alert` to
+  avoid requiring `TELEGRAM_BOT_TOKEN` in CI; `test_health_returns_200`
+  accepts both `"ok"` and `"degraded"` and checks for
+  `"scheduler_running"` key instead of exact response match
+
+---
+
 ## [0.1.0] — 2026-04-19
 
 First complete MVP. All seven steps implemented, tested, and live-demonstrated.
