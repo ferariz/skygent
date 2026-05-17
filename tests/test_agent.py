@@ -401,8 +401,9 @@ class TestNarrateNode:
         ):
             result = await narrate_node(state)
 
-        assert "error" in result
-        assert "LLM timeout" in result["error"]
+        assert "alert" in result
+        assert result["alert"].narrative  # non-empty fallback narrative
+        assert result["alert"].sent is False
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +419,8 @@ class TestNotifyNode:
         alert = alert.model_copy(update={"narrative": "Conditions have changed."})
         state = base_state(alert=alert)
 
-        result = await notify_node(state)
+        with patch("skygent.agent.nodes.send_alert", new=AsyncMock(return_value=None)):
+            result = await notify_node(state)
 
         assert result["alert"].sent is True
         assert "error" not in result
@@ -486,7 +488,8 @@ class TestRunAgent:
         with patch("skygent.agent.nodes.fetch_forecast",
                    new=AsyncMock(return_value=curr)), \
              patch("skygent.agent.nodes._get_llm",
-                   return_value=MagicMock(ainvoke=AsyncMock(return_value=mock_response))):
+                   return_value=MagicMock(ainvoke=AsyncMock(return_value=mock_response))), \
+             patch("skygent.agent.nodes.send_alert", new=AsyncMock(return_value=None)):
             final = await run_agent(PROFILE, previous_snapshot=prev)
 
         assert final["significant"] is True
