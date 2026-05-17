@@ -34,6 +34,8 @@ from urllib.parse import quote
 from streamlit_folium import st_folium
 import folium
 
+from skygent.api.database import PollRun, get_recent_poll_runs, get_session_sync
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -362,6 +364,62 @@ def page_alerts():
 
 
 # ---------------------------------------------------------------------------
+# Page: Poll History
+# ---------------------------------------------------------------------------
+
+def page_poll_history():
+    st.subheader("Poll History")
+
+    try:
+        with get_session_sync() as session:
+            runs = get_recent_poll_runs(session, limit=50)
+
+        if not runs:
+            st.info("No poll runs recorded yet. Runs will appear here once the scheduler starts.")
+            return
+
+        rows = [
+            {
+                "ran_at": r.ran_at.strftime("%Y-%m-%d %H:%M:%S") if r.ran_at else None,
+                "profile_id": r.profile_id,
+                "status": r.status,
+                "changes_detected": r.changes_detected,
+                "alert_sent": r.alert_sent,
+                "duration_ms": r.duration_ms,
+                "error_message": r.error_message,
+            }
+            for r in runs
+        ]
+
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            column_config={
+                "ran_at":            st.column_config.TextColumn("Time"),
+                "profile_id":        st.column_config.TextColumn("Profile"),
+                "status":            st.column_config.TextColumn("Status"),
+                "changes_detected":  st.column_config.NumberColumn("Changes"),
+                "alert_sent":        st.column_config.CheckboxColumn("Alert Sent"),
+                "duration_ms":       st.column_config.NumberColumn("Duration (ms)"),
+                "error_message":     st.column_config.TextColumn("Error"),
+            },
+        )
+
+        total = len(runs)
+        alerts_sent = sum(1 for r in runs if r.alert_sent)
+        errors = sum(1 for r in runs if r.status == "error")
+        error_rate = f"{errors / total * 100:.1f}%" if errors else "0.0%"
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total runs", total)
+        m2.metric("Alerts sent", alerts_sent)
+        m3.metric("Error rate", error_rate)
+
+    except Exception as exc:
+        st.error(str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 
@@ -371,7 +429,7 @@ st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Register event", "Active profiles", "Alert history"],
+    ["Register event", "Active profiles", "Alert history", "Poll History"],
     label_visibility="collapsed",
 )
 
@@ -392,3 +450,5 @@ elif page == "Active profiles":
     page_profiles()
 elif page == "Alert history":
     page_alerts()
+elif page == "Poll History":
+    page_poll_history()
