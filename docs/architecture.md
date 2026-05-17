@@ -105,7 +105,10 @@ the alert is always delivered.
 **`notify_node`**
 Routes the alert to the configured delivery channel (currently Telegram).
 Uses `profile.telegram_chat_id` for per-user routing if registered via bot,
-falls back to `TELEGRAM_CHAT_ID` env var.
+falls back to `TELEGRAM_CHAT_ID` env var. This fallback is a development
+convenience — in production all users register via the Telegram bot and receive
+their own telegram_chat_id. The env var fallback will be removed once multi-user
+routing is the only supported path.
 
 ---
 
@@ -161,6 +164,17 @@ the same database file on Railway's persistent volume.
 current scale (1–5 users, one writer per poll cycle). PostgreSQL adds
 operational complexity without adding capability at this load. The migration
 path is straightforward when concurrency requirements change.
+
+**Snapshot persistence across restarts:** the scheduler maintains one
+`previous_snapshot` per profile to enable diff computation on each poll cycle.
+In the MVP this was an in-memory dict (`SnapshotStore`). In production it is
+backed by `DBSnapshotStore`, a SQLModel implementation that persists the most
+recent `ForecastSnapshot` per profile to SQLite. On application restart,
+`main.py` re-registers all active profiles from the database and the
+`DBSnapshotStore` retrieves their last snapshot on the first poll — no poll
+cycle is lost to a restart. The interface (`get`, `set`, `clear`) is identical
+between the in-memory and DB implementations, which is why the scheduler job
+logic is unchanged between environments.
 
 ---
 
@@ -250,8 +264,11 @@ prompt adjusts tone based on this field. Adding a new context means adding
 a tone description to the system prompt — no code changes.
 
 **Forecast Q&A:** users with no pending alerts can ask context-aware questions
-answered using the current forecast snapshot and the `PollRun` change history.
-This preserves the architecture principle: the LLM receives structured data
-the engine has already computed and validated, and narrates it in response to
-a user query. The `poll_runs` audit table built in v0.2.0 is the context
-source for this feature.
+via Telegram. The LLM receives a structured payload distinct from the alert
+narration payload: the current ForecastSnapshot data for their event location,
+a summarised history of PollRun records showing what changed and when, the
+MonitoringProfile metadata (event name, date, context), and the user's
+free-text question. The LLM narrates an answer grounded in data the engine
+has already fetched and validated — it never fetches or evaluates forecast
+data itself. The poll_runs audit table built in v0.2.0 is the context source
+for this feature.
