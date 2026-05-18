@@ -52,8 +52,8 @@ D. Unused imports removed: json and Optional were not used.
 from __future__ import annotations
 
 import json
-
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Generator
@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 # Database engine
 # ---------------------------------------------------------------------------
 
-DATABASE_URL = "sqlite:///skygent.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///skygent.db")
 
 def _set_wal_mode(dbapi_conn, connection_record):
     """Enable WAL journal mode for better concurrent read/write performance.
