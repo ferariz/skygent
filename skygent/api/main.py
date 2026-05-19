@@ -214,6 +214,7 @@ def health() -> dict:
         db_ok = False
         last_poll_ran_at = None
         last_poll_status = None
+        db_error = None
         try:
             with get_session_sync() as session:
                 runs = get_recent_poll_runs(session, limit=1)
@@ -221,8 +222,8 @@ def health() -> dict:
                 last_poll_ran_at = runs[0].ran_at.isoformat()
                 last_poll_status = runs[0].status
             db_ok = True
-        except Exception:
-            pass
+        except Exception as exc:
+            db_error = str(exc)
 
         scheduler_running = is_scheduler_running()
         status = "ok" if (db_ok and scheduler_running) else "degraded"
@@ -234,6 +235,7 @@ def health() -> dict:
             "last_poll_ran_at": last_poll_ran_at,
             "last_poll_status": last_poll_status,
             "db_ok": db_ok,
+            "db_error": db_error,
         }
     except Exception as exc:
         return {"status": "degraded", "error": str(exc)}
