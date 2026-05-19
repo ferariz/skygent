@@ -62,11 +62,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
+from sqlalchemy import text
+
 from skygent.api.database import (
     AlertRow,
     ProfileRow,
     deregister_snapshots,
     get_session,
+    get_session_sync,
     list_alerts,
     list_profiles,
     load_profile,
@@ -338,3 +341,20 @@ def get_status(
         jobs=jobs,
         timestamp=datetime.now(timezone.utc),
     )
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY DEBUG
+# ---------------------------------------------------------------------------
+
+@router.get("/debug/tables")
+def debug_tables() -> dict:
+    """Return all table names present in the SQLite database."""  # TEMPORARY DEBUG
+    try:
+        with get_session_sync() as session:
+            rows = session.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            ).all()
+        return {"tables": [row[0] for row in rows]}
+    except Exception as exc:
+        return {"error": str(exc)}
