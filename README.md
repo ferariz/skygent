@@ -184,6 +184,8 @@ Skygent is intentionally **not that system**.
 
 ## Project status
 
+**Live in production** — `https://skygent-production.up.railway.app`
+
 | Step | Component | Status |
 |---|---|---|
 | 1 | Core models, diff engine, significance evaluator | ✅ Complete |
@@ -193,6 +195,7 @@ Skygent is intentionally **not that system**.
 | 5 | FastAPI routes + DB persistence | ✅ Complete |
 | 6 | Telegram notifications | ✅ Complete |
 | 7 | Streamlit dashboard | ✅ Complete |
+| 8 | Railway deployment | ✅ Live |
 
 ---
 
@@ -229,7 +232,7 @@ skygent/
 │   ├── test_api.py           # 42 tests
 │   └── test_telegram.py      # 21 tests
 ├── docs/
-│   └── design.md             # Architecture and design decisions
+│   └── architecture.md       # Architecture and design decisions
 ├── requirements.txt
 └── pytest.ini
 ```
@@ -253,6 +256,7 @@ Set credentials:
 export OPENAI_API_KEY=sk-...
 export TELEGRAM_BOT_TOKEN=...
 export TELEGRAM_CHAT_ID=...
+export SKYGENT_API_URL=http://localhost:8000
 ```
 
 ---
@@ -260,10 +264,13 @@ export TELEGRAM_CHAT_ID=...
 ## Running the stack
 
 ```bash
-# Terminal 1 — API server
+# Production — single process (API + Telegram bot)
+python -m skygent.launcher
+
+# Development — API server
 uvicorn skygent.api.main:app --port 8000 --reload
 
-# Terminal 2 — Dashboard
+# Development — Dashboard (separate terminal)
 streamlit run ui/app.py
 ```
 
@@ -336,7 +343,7 @@ print(state["current_snapshot"].data)
 
 ## Design documentation
 
-Architecture decisions, tradeoffs, and the rationale behind non-obvious choices are documented in [`docs/design.md`](docs/design.md).
+Architecture decisions, tradeoffs, and the rationale behind non-obvious choices are documented in [`docs/architecture.md`](docs/architecture.md).
 
 ---
 

@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.0] — 2026-05-20
+
+Railway deployment and single-process launcher.
+
+### Added
+
+- **Single-process launcher** (`skygent/launcher.py`) — runs FastAPI and Telegram bot concurrently in one process using `asyncio.gather`
+- **Railway deployment** — persistent volume mounted at `/data`; app live at `skygent-production.up.railway.app`
+- **`SKYGENT_API_URL` environment variable** — configures the base URL for inter-service API calls
+- **`DATABASE_URL` from environment** — database path now read from `DATABASE_URL` env var, enabling Railway volume persistence
+
+### Fixed
+
+- **`PollRun` detached instance error** in `/health` endpoint — attributes now accessed inside the session context
+- **`$PORT` shell expansion** in Railway start command — fixed variable quoting in `railway.toml`
+
+### Infrastructure
+
+- `Dockerfile` — container image for Railway deployment
+- `.dockerignore` — excludes virtualenv, cache, and test artifacts
+- Railway Hobby plan at `skygent-production.up.railway.app`
+
+---
+
 ## [0.2.0] — 2026-05-17
 
 Session 1 hardening: observability, resilience, and audit trail.
