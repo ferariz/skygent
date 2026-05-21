@@ -441,16 +441,30 @@ def get_recent_poll_runs(
     session: Session,
     limit: int = 20,
     profile_id: str | None = None,
-) -> list[PollRun]:
+) -> list[dict]:
     """
     Return recent poll runs ordered by ran_at descending.
     Optionally filtered to a single profile.
+
+    Returns list[dict] (not list[PollRun]) so callers can safely access
+    attributes after the session closes — eliminates the
+    'Instance <PollRun> is not bound to a Session' detached-instance error.
     """
-    stmt = select(PollRun)
+    stmt = select(PollRun).order_by(PollRun.ran_at.desc()).limit(limit)
     if profile_id is not None:
         stmt = stmt.where(PollRun.profile_id == profile_id)
-    stmt = stmt.order_by(PollRun.ran_at.desc()).limit(limit)
-    return list(session.exec(stmt).all())
+    rows = session.exec(stmt).all()
+    return [
+        {
+            'ran_at': row.ran_at.isoformat(),
+            'status': row.status,
+            'changes_detected': row.changes_detected,
+            'alert_sent': row.alert_sent,
+            'error_message': row.error_message,
+            'duration_ms': row.duration_ms,
+        }
+        for row in rows
+    ]
 
 
 def get_profiles_by_chat_id(

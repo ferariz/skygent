@@ -230,6 +230,13 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ <b>{name}</b> is now being monitored!\n\n"
             "I'll send you updates when the forecast changes significantly."
         ),
+        'forecast_no_data': 'No forecast data yet for your event — I will message you once the first poll cycle runs (within 6 hours of registration).',
+        'forecast_header': 'Here is the current forecast summary for {name}:',
+        'forecast_multi_profile': 'Showing forecast for {name} (your soonest upcoming event).',
+        'ctx_social_event': '💒 Social event (wedding, party, concert)',
+        'ctx_agriculture':  '🌾 Agriculture (harvest, planting, livestock)',
+        'ctx_energy':       '⚡ Energy (wind farm, solar, grid)',
+        'ctx_logistics':    '🚛 Logistics (transport, construction, outdoor work)',
     },
     'es': {
         'welcome': (
@@ -302,6 +309,13 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ <b>{name}</b> está siendo monitoreado.\n\n"
             "Te enviaré actualizaciones cuando el pronóstico cambie significativamente."
         ),
+        'forecast_no_data': 'Aún no hay datos de pronóstico para tu evento — te escribiré cuando se ejecute el primer ciclo de monitoreo (dentro de las 6 horas siguientes al registro).',
+        'forecast_header': 'Aquí está el resumen del pronóstico actual para {name}:',
+        'forecast_multi_profile': 'Mostrando pronóstico para {name} (tu próximo evento más cercano).',
+        'ctx_social_event': '💒 Evento social (boda, fiesta, concierto)',
+        'ctx_agriculture':  '🌾 Agricultura (cosecha, siembra, ganadería)',
+        'ctx_energy':       '⚡ Energía (parque eólico, solar, red)',
+        'ctx_logistics':    '🚛 Logística (transporte, construcción, trabajo exterior)',
     },
 }
 
@@ -826,10 +840,10 @@ def handle_ask_time(chat_id: str, update: dict) -> None:
         chat_id,
         t('time_confirmed', lang).format(time=parsed.strftime('%H:%M UTC')),
         reply_markup=_inline_keyboard([
-            ("💒 Social event (wedding, party, concert)", "social_event"),
-            ("🌾 Agriculture (harvest, planting, livestock)", "agriculture"),
-            ("⚡ Energy (wind farm, solar, grid)", "energy"),
-            ("🚛 Logistics (transport, construction, outdoor work)", "logistics"),
+            (t('ctx_social_event', lang), "social_event"),
+            (t('ctx_agriculture', lang),  "agriculture"),
+            (t('ctx_energy', lang),       "energy"),
+            (t('ctx_logistics', lang),    "logistics"),
         ]),
     )
 
@@ -1045,6 +1059,18 @@ def handle_forecast_query(chat_id: str, update: dict) -> None:
         snapshot = load_latest_snapshot(session, profile.id)
         poll_runs = get_recent_poll_runs(session, limit=10, profile_id=profile.id)
 
+    # Fix 2A — graceful empty state when no data exists yet
+    if not poll_runs and snapshot is None:
+        send_message(chat_id, t('forecast_no_data', lang))
+        return
+
+    # Fix 2C — multi-profile disambiguation
+    if len(profiles) > 1:
+        send_message(chat_id, t('forecast_multi_profile', lang).format(name=profile.name))
+
+    # Fix 2B — header line before narrative
+    send_message(chat_id, t('forecast_header', lang).format(name=profile.name))
+
     payload = {
         'profile': {
             'name': profile.name,
@@ -1059,10 +1085,10 @@ def handle_forecast_query(chat_id: str, update: dict) -> None:
         },
         'poll_history': [
             {
-                'ran_at': r.ran_at.isoformat(),
-                'status': r.status,
-                'changes_detected': r.changes_detected,
-                'alert_sent': r.alert_sent,
+                'ran_at': r['ran_at'],
+                'status': r['status'],
+                'changes_detected': r['changes_detected'],
+                'alert_sent': r['alert_sent'],
             }
             for r in poll_runs
         ],

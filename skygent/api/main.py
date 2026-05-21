@@ -218,8 +218,8 @@ def health() -> dict:
             with get_session_sync() as session:
                 runs = get_recent_poll_runs(session, limit=1)
                 if runs:
-                    last_poll_ran_at = runs[0].ran_at.isoformat()
-                    last_poll_status = runs[0].status
+                    last_poll_ran_at = runs[0]['ran_at']
+                    last_poll_status = runs[0]['status']
             db_ok = True
         except Exception:
             pass

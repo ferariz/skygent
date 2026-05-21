@@ -433,7 +433,9 @@ class TestHandleForecastQuery:
             handle_forecast_query("chat_123", {})
 
         mock_llm.invoke.assert_called_once()
-        mock_send.assert_called_once()
+        # send_message is now called at least twice: header + LLM narrative
+        assert mock_send.call_count >= 2
+        # The LLM narrative is the last send_message call
         sent_text = mock_send.call_args[0][1]
         assert "weather looks good" in sent_text
 
@@ -458,7 +460,8 @@ class TestHandleForecastQuery:
 
             handle_forecast_query("chat_123", {})
 
-        mock_send.assert_called_once()
+        # send_message is now called at least twice: header + fallback
+        assert mock_send.call_count >= 2
         sent_text = mock_send.call_args[0][1]
         # Fallback message should mention inability to retrieve info
         assert len(sent_text) > 0
@@ -474,6 +477,9 @@ class TestHandleForecastQuery:
             name="Sooner Event",
             event_datetime=datetime.now(timezone.utc) + timedelta(days=5),
         )
+        # Provide a snapshot for the soonest profile so we don't hit the
+        # graceful empty-state early return (poll_runs=[], snapshot=None).
+        sooner_snapshot = self._make_snapshot(p_sooner.id)
 
         mock_llm_response = MagicMock()
         mock_llm_response.content = "Forecast info."
@@ -488,7 +494,7 @@ class TestHandleForecastQuery:
 
         with patch("skygent.integrations.telegram_bot._load_state", return_value=("IDLE", {})), \
              patch("skygent.integrations.telegram_bot.get_profiles_by_chat_id", return_value=[p_later, p_sooner]), \
-             patch("skygent.integrations.telegram_bot.load_latest_snapshot", return_value=None), \
+             patch("skygent.integrations.telegram_bot.load_latest_snapshot", return_value=sooner_snapshot), \
              patch("skygent.integrations.telegram_bot.get_recent_poll_runs", return_value=[]), \
              patch("skygent.integrations.telegram_bot.get_session_sync") as mock_session, \
              patch("skygent.integrations.telegram_bot._get_llm") as mock_get_llm, \
