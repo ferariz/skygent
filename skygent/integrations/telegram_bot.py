@@ -335,7 +335,7 @@ def _clear_state(chat_id: str) -> None:
 # Welcome message — initial forecast narrative
 # ---------------------------------------------------------------------------
 
-_WELCOME_SYSTEM_PROMPT = """\
+_WELCOME_BASE_SYSTEM_PROMPT = """\
 You are Skygent, a friendly AI weather monitoring assistant.
 
 A user has just registered an event for weather monitoring. Write a warm,
@@ -351,6 +351,13 @@ informative welcome message that:
 Tone: friendly, clear, reassuring. Plain prose only — no markdown, no bullet
 points. Under 200 words. Do not mention specific model names or API details.
 """
+
+
+def _build_welcome_system_prompt(language: str) -> str:
+    """Build the welcome narrative system prompt with optional Spanish instruction."""
+    if language == 'es':
+        return _WELCOME_BASE_SYSTEM_PROMPT + 'Respond entirely in Spanish. Do not use English.\n'
+    return _WELCOME_BASE_SYSTEM_PROMPT
 
 
 # Module-level LLM instance — created on first use (lazy init so
@@ -392,7 +399,7 @@ def _generate_welcome_narrative(
 
     llm = _get_llm()
     messages = [
-        SystemMessage(content=_WELCOME_SYSTEM_PROMPT),
+        SystemMessage(content=_build_welcome_system_prompt(profile.language)),
         HumanMessage(content=json.dumps(payload, indent=2)),
     ]
 
