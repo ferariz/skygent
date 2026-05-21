@@ -191,6 +191,10 @@ class MonitoringProfile(BaseModel):
     # Optional free-text for the narrator (e.g. "outdoor, no tent backup")
     notes: str = ""
 
+    # Language for narration and bot messages. Serialized into ProfileRow.data
+    # JSON blob — old rows without this field deserialize to default 'en'.
+    language: Literal['en', 'es'] = 'en'
+
     # --- Field validators ---------------------------------------------------
 
     @field_validator("location")
