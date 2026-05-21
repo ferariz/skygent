@@ -104,6 +104,7 @@ class ProfileCreate(BaseModel):
     event_duration_hours: int = Field(default=4, ge=1)
     context: ContextType = Field(default="social_event")  # fix C: Literal not str
     notes: str = Field(default="")
+    language: str = Field(default="en")
 
 
 class ProfileResponse(BaseModel):
@@ -218,6 +219,7 @@ def create_profile(
             event_duration_hours=payload.event_duration_hours,
             context=payload.context,
             notes=payload.notes,
+            language=payload.language,
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc))
