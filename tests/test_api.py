@@ -32,8 +32,12 @@ from sqlmodel.pool import StaticPool
 from skygent.api.database import (
     AlertRow,
     DBSnapshotStore,
+    PollRun,
     ProfileRow,
     SnapshotRow,
+    create_poll_run,
+    get_profiles_by_chat_id,
+    get_recent_poll_runs,
     list_alerts,
     list_profiles,
     load_latest_snapshot,
@@ -282,6 +286,121 @@ class TestDatabase:
         p1_alerts = list_alerts(session, profile_id=p1.id)
         assert all(a.profile_id == p1.id for a in p1_alerts)
         assert len(p1_alerts) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestGetProfilesByChatId
+# ---------------------------------------------------------------------------
+
+class TestGetProfilesByChatId:
+    def test_returns_profiles_matching_chat_id(self, session):
+        p1 = make_profile(name="User A Event", telegram_chat_id="chat_111")
+        p2 = make_profile(name="User B Event", telegram_chat_id="chat_222")
+        save_profile(session, p1)
+        save_profile(session, p2)
+        session.commit()
+
+        results = get_profiles_by_chat_id(session, "chat_111")
+        assert len(results) == 1
+        assert results[0].id == p1.id
+
+    def test_returns_empty_when_no_match(self, session):
+        p = make_profile(name="Someone's Event", telegram_chat_id="chat_999")
+        save_profile(session, p)
+        session.commit()
+
+        results = get_profiles_by_chat_id(session, "chat_000")
+        assert results == []
+
+    def test_excludes_past_events(self, session):
+        active = make_profile(name="Future", telegram_chat_id="chat_111")
+        expired = make_profile(
+            name="Past",
+            telegram_chat_id="chat_111",
+            event_datetime=datetime.now(timezone.utc) - timedelta(days=1),
+            monitoring_start=datetime.now(timezone.utc) - timedelta(days=2),
+        )
+        save_profile(session, active)
+        save_profile(session, expired)
+        session.commit()
+
+        results = get_profiles_by_chat_id(session, "chat_111")
+        ids = [p.id for p in results]
+        assert active.id in ids
+        assert expired.id not in ids
+
+    def test_sorted_by_event_datetime_ascending(self, session):
+        p_later = make_profile(
+            name="Later Event",
+            telegram_chat_id="chat_111",
+            event_datetime=datetime.now(timezone.utc) + timedelta(days=60),
+        )
+        p_sooner = make_profile(
+            name="Sooner Event",
+            telegram_chat_id="chat_111",
+            event_datetime=datetime.now(timezone.utc) + timedelta(days=10),
+        )
+        save_profile(session, p_later)
+        save_profile(session, p_sooner)
+        session.commit()
+
+        results = get_profiles_by_chat_id(session, "chat_111")
+        assert len(results) == 2
+        assert results[0].id == p_sooner.id
+        assert results[1].id == p_later.id
+
+    def test_excludes_profiles_with_no_chat_id(self, session):
+        p = make_profile(name="No Chat ID Event")  # telegram_chat_id=None
+        save_profile(session, p)
+        session.commit()
+
+        results = get_profiles_by_chat_id(session, "chat_111")
+        assert results == []
+
+
+class TestGetRecentPollRunsWithProfileId:
+    def _make_poll_run(self, profile_id: str) -> PollRun:
+        return PollRun(
+            profile_id=profile_id,
+            ran_at=datetime.now(timezone.utc),
+            status="ok",
+            changes_detected=0,
+            alert_sent=False,
+        )
+
+    def test_filter_by_profile_id(self, session):
+        p1 = make_profile(name="Profile 1")
+        p2 = make_profile(name="Profile 2")
+        run1 = self._make_poll_run(p1.id)
+        run2 = self._make_poll_run(p2.id)
+        session.add(run1)
+        session.add(run2)
+        session.commit()
+
+        results = get_recent_poll_runs(session, profile_id=p1.id)
+        assert all(r.profile_id == p1.id for r in results)
+        assert len(results) == 1
+
+    def test_no_filter_returns_all(self, session):
+        p1 = make_profile(name="Profile 1")
+        p2 = make_profile(name="Profile 2")
+        run1 = self._make_poll_run(p1.id)
+        run2 = self._make_poll_run(p2.id)
+        session.add(run1)
+        session.add(run2)
+        session.commit()
+
+        results = get_recent_poll_runs(session)
+        assert len(results) == 2
+
+    def test_limit_respected(self, session):
+        p = make_profile(name="Profile 1")
+        for _ in range(5):
+            session.add(self._make_poll_run(p.id))
+        session.commit()
+
+        results = get_recent_poll_runs(session, limit=3, profile_id=p.id)
+        assert len(results) == 3
 
 
 # ---------------------------------------------------------------------------

@@ -437,10 +437,54 @@ def create_poll_run(session: Session, poll_run: PollRun) -> PollRun:
     return poll_run
 
 
-def get_recent_poll_runs(session: Session, limit: int = 20) -> list[PollRun]:
-    """Return the most recent poll runs ordered by ran_at descending."""
-    stmt = select(PollRun).order_by(PollRun.ran_at.desc()).limit(limit)
+def get_recent_poll_runs(
+    session: Session,
+    limit: int = 20,
+    profile_id: str | None = None,
+) -> list[PollRun]:
+    """
+    Return recent poll runs ordered by ran_at descending.
+    Optionally filtered to a single profile.
+    """
+    stmt = select(PollRun)
+    if profile_id is not None:
+        stmt = stmt.where(PollRun.profile_id == profile_id)
+    stmt = stmt.order_by(PollRun.ran_at.desc()).limit(limit)
     return list(session.exec(stmt).all())
+
+
+def get_profiles_by_chat_id(
+    session: Session,
+    chat_id: str,
+) -> list[MonitoringProfile]:
+    """
+    Return active (is_active=True, event_datetime > now) profiles whose
+    telegram_chat_id matches the given chat_id.
+
+    The telegram_chat_id field lives inside the JSON blob, so we cannot
+    filter it in SQL (SQLite does not support JSON extraction portably).
+    Instead we fetch all active profiles and filter in Python.
+
+    Returns profiles sorted by event_datetime ascending (soonest first).
+    """
+    now = datetime.now(timezone.utc)
+    stmt = select(ProfileRow).where(
+        ProfileRow.is_active == True,          # noqa: E712
+        ProfileRow.event_datetime > now,
+    )
+    rows = session.exec(stmt).all()
+
+    profiles: list[MonitoringProfile] = []
+    for row in rows:
+        try:
+            profile = MonitoringProfile.model_validate_json(row.data)
+        except Exception:
+            continue
+        if profile.telegram_chat_id == chat_id:
+            profiles.append(profile)
+
+    profiles.sort(key=lambda p: p.event_datetime)
+    return profiles
 
 
 # ---------------------------------------------------------------------------

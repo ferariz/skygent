@@ -307,7 +307,7 @@ async def evaluate_significance_node(state: AgentState) -> dict:
 # Node: narrate
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
+_BASE_SYSTEM_PROMPT = """\
 You are a weather alert narrator for Skygent, an AI weather monitoring agent.
 Your job is to write a clear, concise alert message when a forecast changes \
 significantly for a user-defined event.
@@ -323,6 +323,13 @@ agriculture = practical and direct, energy/logistics = technical and precise).
 - Never invent data. Only describe what is in the alert JSON provided.
 - Do not include a subject line or greeting — start directly with the update.
 """
+
+
+def _build_system_prompt(language: str) -> str:
+    """Build the narrate node system prompt, appending Spanish instruction when needed."""
+    if language == 'es':
+        return _BASE_SYSTEM_PROMPT + 'Respond entirely in Spanish. Do not use English.\n'
+    return _BASE_SYSTEM_PROMPT
 
 
 def _build_narrate_prompt(state: AgentState) -> str:
@@ -412,7 +419,7 @@ async def narrate_node(state: AgentState) -> dict:
     try:
         llm = _get_llm()
         messages = [
-            SystemMessage(content=_SYSTEM_PROMPT),
+            SystemMessage(content=_build_system_prompt(profile.language)),
             HumanMessage(content=_build_narrate_prompt(state)),
         ]
         response = await _llm_retry(llm.ainvoke)(messages)

@@ -116,7 +116,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from skygent.api.database import (
     clear_conversation_state,
     get_conversation_state,
+    get_profiles_by_chat_id,
+    get_recent_poll_runs,
     get_session_sync,
+    load_latest_snapshot,
     save_conversation_state,
 )
 from skygent.core.models import MonitoringProfile, ForecastSnapshot
@@ -141,6 +144,7 @@ CONVERSATION_EXPIRY_HOURS = 24  # clear stale state after this many hours
 class Step:
     """Named constants for conversation state machine steps."""
     IDLE         = "IDLE"
+    ASK_LANGUAGE = "ASK_LANGUAGE"
     ASK_LOCATION = "ASK_LOCATION"
     ASK_NAME     = "ASK_NAME"
     ASK_DATE     = "ASK_DATE"
@@ -148,6 +152,171 @@ class Step:
     ASK_CONTEXT  = "ASK_CONTEXT"
     ASK_DURATION = "ASK_DURATION"
     CONFIRM      = "CONFIRM"
+
+
+# ---------------------------------------------------------------------------
+# Strings — all user-facing registration flow text, bilingual
+# ---------------------------------------------------------------------------
+
+STRINGS: dict[str, dict[str, str]] = {
+    'en': {
+        'welcome': (
+            "<b>👋 Welcome to Skygent!</b>\n\n"
+            "I monitor the weather forecast for your events and alert you "
+            "when conditions change significantly.\n\n"
+            "First, choose your preferred language:"
+        ),
+        'ask_location': (
+            "To get started, <b>send me your event location</b> as a "
+            "Telegram location pin 📍\n\n"
+            "Tap the 📎 paperclip → Location, then drop a pin on the map."
+        ),
+        'location_missing': (
+            "I need a location pin 📍\n\n"
+            "Tap the 📎 paperclip → Location, then drop a pin on the map."
+        ),
+        'location_received': "📍 Got it — <b>{lat}, {lon}</b>\n\nWhat should I call this event?\n<i>e.g. Ana & Juan's Wedding, Harvest Day, Wind Farm Inspection</i>",
+        'ask_name_missing': "Please send the event name as a text message.",
+        'name_confirmed': "Great — <b>{name}</b> ✓\n\nWhat date is the event?\n<i>e.g. September 15, 2026 / 2026-09-15 / 15/09/2026</i>",
+        'ask_date_missing': "Please send the event date as a text message.",
+        'date_unparseable': (
+            "I couldn't understand that date 🤔\n\n"
+            "Please try a format like:\n"
+            "• <b>September 15, 2026</b>\n"
+            "• <b>2026-09-15</b>\n"
+            "• <b>15/09/2026</b>"
+        ),
+        'date_in_past': "That date is in the past. Please send a future event date.",
+        'date_confirmed': "📅 <b>{date}</b> ✓\n\nWhat time does the event start? <i>(UTC)</i>\n<i>e.g. 17:00 / 5pm / 14:30</i>\n\nAll times are in UTC. Montevideo is UTC-3, so 5pm local = 20:00 UTC.",
+        'ask_time_missing': "Please send the event time as a text message.",
+        'time_unparseable': (
+            "I couldn't understand that time 🤔\n\n"
+            "Please try a format like:\n"
+            "• <b>17:00</b>\n"
+            "• <b>5pm</b>\n"
+            "• <b>14:30</b>"
+        ),
+        'time_confirmed': "⏰ <b>{time}</b> ✓\n\nWhat type of event is this?",
+        'ask_duration': "How long does the event last?",
+        'confirm_header': "<b>Please confirm your event:</b>",
+        'confirm_body': (
+            "📍 <b>Name:</b> {name}\n"
+            "🗺 <b>Location:</b> {lat}, {lon}\n"
+            "📅 <b>Date:</b> {date}\n"
+            "⏱ <b>Duration:</b> {duration} hours\n"
+            "🏷 <b>Context:</b> {context}\n\n"
+            "Skygent will check the forecast every <b>{interval}h</b> and alert you when conditions change significantly."
+        ),
+        'cancelled': "Registration cancelled. Send /start whenever you're ready to try again.",
+        'cancel_any': "Cancelled. Send /start to begin again.",
+        'registering': "⏳ Registering your event and fetching the first forecast...",
+        'registration_failed': (
+            "❌ Something went wrong registering your event. "
+            "Please try again or contact support."
+        ),
+        'use_buttons': "Please use the buttons above to continue, or send /cancel to start over.",
+        'no_active_events': "You have no active events being monitored. Send /start to register one.",
+        'beyond_forecast_window': (
+            "✅ <b>{name}</b> is now being monitored!\n\n"
+            "📅 Your event is <b>{days:.0f} days away</b> — "
+            "weather forecasts are only available up to 16 days out, "
+            "so I don't have data yet.\n\n"
+            "I'll check every <b>{interval}h</b> "
+            "and send you the first forecast as soon as it becomes available "
+            "(roughly {wait:.0f} days from now). "
+            "I'll also alert you whenever the forecast changes significantly."
+        ),
+        'welcome_fallback': (
+            "✅ <b>{name}</b> is now being monitored!\n\n"
+            "I'll send you updates when the forecast changes significantly."
+        ),
+    },
+    'es': {
+        'welcome': (
+            "<b>👋 ¡Bienvenido a Skygent!</b>\n\n"
+            "Monitoreo el pronóstico del tiempo para tus eventos y te aviso "
+            "cuando las condiciones cambien significativamente.\n\n"
+            "Primero, elige tu idioma preferido:"
+        ),
+        'ask_location': (
+            "Para comenzar, <b>envíame la ubicación de tu evento</b> como un "
+            "pin de ubicación de Telegram 📍\n\n"
+            "Toca el 📎 clip → Ubicación y coloca un pin en el mapa."
+        ),
+        'location_missing': (
+            "Necesito un pin de ubicación 📍\n\n"
+            "Toca el 📎 clip → Ubicación y coloca un pin en el mapa."
+        ),
+        'location_received': "📍 Listo — <b>{lat}, {lon}</b>\n\n¿Cómo se llama este evento?\n<i>ej. Boda de Ana y Juan, Día de cosecha, Inspección del parque eólico</i>",
+        'ask_name_missing': "Por favor envía el nombre del evento como mensaje de texto.",
+        'name_confirmed': "Genial — <b>{name}</b> ✓\n\n¿Qué fecha es el evento?\n<i>ej. 15 de septiembre de 2026 / 2026-09-15 / 15/09/2026</i>",
+        'ask_date_missing': "Por favor envía la fecha del evento como mensaje de texto.",
+        'date_unparseable': (
+            "No pude entender esa fecha 🤔\n\n"
+            "Por favor intenta un formato como:\n"
+            "• <b>15 de septiembre de 2026</b>\n"
+            "• <b>2026-09-15</b>\n"
+            "• <b>15/09/2026</b>"
+        ),
+        'date_in_past': "Esa fecha es en el pasado. Por favor envía una fecha futura.",
+        'date_confirmed': "📅 <b>{date}</b> ✓\n\n¿A qué hora comienza el evento? <i>(UTC)</i>\n<i>ej. 17:00 / 5pm / 14:30</i>\n\nTodas las horas son UTC. Montevideo es UTC-3, así que las 5pm locales = 20:00 UTC.",
+        'ask_time_missing': "Por favor envía la hora del evento como mensaje de texto.",
+        'time_unparseable': (
+            "No pude entender esa hora 🤔\n\n"
+            "Por favor intenta un formato como:\n"
+            "• <b>17:00</b>\n"
+            "• <b>5pm</b>\n"
+            "• <b>14:30</b>"
+        ),
+        'time_confirmed': "⏰ <b>{time}</b> ✓\n\n¿Qué tipo de evento es este?",
+        'ask_duration': "¿Cuánto dura el evento?",
+        'confirm_header': "<b>Por favor confirma tu evento:</b>",
+        'confirm_body': (
+            "📍 <b>Nombre:</b> {name}\n"
+            "🗺 <b>Ubicación:</b> {lat}, {lon}\n"
+            "📅 <b>Fecha:</b> {date}\n"
+            "⏱ <b>Duración:</b> {duration} horas\n"
+            "🏷 <b>Contexto:</b> {context}\n\n"
+            "Skygent verificará el pronóstico cada <b>{interval}h</b> y te avisará cuando las condiciones cambien significativamente."
+        ),
+        'cancelled': "Registro cancelado. Envía /start cuando estés listo para intentarlo de nuevo.",
+        'cancel_any': "Cancelado. Envía /start para empezar de nuevo.",
+        'registering': "⏳ Registrando tu evento y obteniendo el primer pronóstico...",
+        'registration_failed': (
+            "❌ Algo salió mal al registrar tu evento. "
+            "Por favor intenta de nuevo o contacta al soporte."
+        ),
+        'use_buttons': "Por favor usa los botones de arriba para continuar, o envía /cancel para empezar de nuevo.",
+        'no_active_events': "No tienes eventos activos siendo monitoreados. Envía /start para registrar uno.",
+        'beyond_forecast_window': (
+            "✅ <b>{name}</b> está siendo monitoreado.\n\n"
+            "📅 Tu evento está a <b>{days:.0f} días</b> — "
+            "los pronósticos del tiempo solo están disponibles hasta 16 días, "
+            "así que aún no tengo datos.\n\n"
+            "Verificaré cada <b>{interval}h</b> "
+            "y te enviaré el primer pronóstico tan pronto como esté disponible "
+            "(aproximadamente en {wait:.0f} días). "
+            "También te avisaré cuando el pronóstico cambie significativamente."
+        ),
+        'welcome_fallback': (
+            "✅ <b>{name}</b> está siendo monitoreado.\n\n"
+            "Te enviaré actualizaciones cuando el pronóstico cambie significativamente."
+        ),
+    },
+}
+
+
+def t(key: str, lang: str) -> str:
+    """
+    Return the string for `key` in the given language.
+    Falls back to 'en' if the language dict is missing the key.
+    This makes partial translations safe.
+    """
+    lang_strings = STRINGS.get(lang, STRINGS['en'])
+    if key in lang_strings:
+        return lang_strings[key]
+    # Fall back to English rather than raising KeyError
+    return STRINGS['en'].get(key, key)
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +487,20 @@ def _load_state(chat_id: str) -> tuple[str, dict]:
     except Exception:
         data = {}
 
+    # Guard: if step is unknown (e.g. from a mid-flow deploy), reset to IDLE
+    VALID_STEPS = {
+        Step.IDLE, Step.ASK_LANGUAGE, Step.ASK_LOCATION, Step.ASK_NAME,
+        Step.ASK_DATE, Step.ASK_TIME, Step.ASK_CONTEXT, Step.ASK_DURATION,
+        Step.CONFIRM,
+    }
+    if step not in VALID_STEPS:
+        logger.warning(
+            'bot: unknown step %s for chat %s — resetting to IDLE', step, chat_id
+        )
+        with get_session_sync() as session:
+            clear_conversation_state(session, chat_id)
+        return Step.IDLE, {}
+
     return step, data
 
 
@@ -335,7 +518,7 @@ def _clear_state(chat_id: str) -> None:
 # Welcome message — initial forecast narrative
 # ---------------------------------------------------------------------------
 
-_WELCOME_SYSTEM_PROMPT = """\
+_WELCOME_BASE_SYSTEM_PROMPT = """\
 You are Skygent, a friendly AI weather monitoring assistant.
 
 A user has just registered an event for weather monitoring. Write a warm,
@@ -350,6 +533,26 @@ informative welcome message that:
 
 Tone: friendly, clear, reassuring. Plain prose only — no markdown, no bullet
 points. Under 200 words. Do not mention specific model names or API details.
+"""
+
+
+def _build_welcome_system_prompt(language: str) -> str:
+    """Build the welcome narrative system prompt with optional Spanish instruction."""
+    if language == 'es':
+        return _WELCOME_BASE_SYSTEM_PROMPT + 'Respond entirely in Spanish. Do not use English.\n'
+    return _WELCOME_BASE_SYSTEM_PROMPT
+
+
+QA_SYSTEM_PROMPT = """\
+You are a weather forecast assistant for Skygent, an AI weather monitoring service.
+
+Rules:
+- Only describe data that is present in the payload provided. Never invent values.
+- Respond in the user's language (check profile.language: 'es' = Spanish, 'en' = English).
+- Answer conversationally in plain prose. No markdown, no bullet points.
+- Keep your response under 200 words.
+- If asked something that cannot be answered from the payload data, say so honestly.
+- Do not include a subject line or greeting — start directly with the information.
 """
 
 
@@ -392,7 +595,7 @@ def _generate_welcome_narrative(
 
     llm = _get_llm()
     messages = [
-        SystemMessage(content=_WELCOME_SYSTEM_PROMPT),
+        SystemMessage(content=_build_welcome_system_prompt(profile.language)),
         HumanMessage(content=json.dumps(payload, indent=2)),
     ]
 
@@ -465,6 +668,7 @@ def _register_profile_via_api(data: dict, chat_id: str) -> dict | None:
         "event_duration_hours": int(data.get("duration_hours", 4)),
         "context":             data.get("context", "social_event"),
         "notes":               f"Registered via Telegram bot (chat_id={chat_id})",
+        "language":            data.get("language", "en"),
     }
 
     try:
@@ -482,43 +686,49 @@ def _register_profile_via_api(data: dict, chat_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def handle_idle(chat_id: str, update: dict) -> None:
-    """Any message in IDLE state → explain the bot and ask for a location."""
-    text = (
-        "<b>👋 Welcome to Skygent!</b>\n\n"
-        "I monitor the weather forecast for your events and alert you "
-        "when conditions change significantly.\n\n"
-        "To get started, <b>send me your event location</b> as a "
-        "Telegram location pin 📍\n\n"
-        "Tap the 📎 paperclip → Location, then drop a pin on the map."
+    """Any message in IDLE state → ask for language preference first."""
+    send_message(
+        chat_id,
+        t('welcome', 'en'),
+        reply_markup=_inline_keyboard([
+            ("🇬🇧 English", "lang_en"),
+            ("🇪🇸 Español", "lang_es"),
+        ]),
     )
-    send_message(chat_id, text)
-    _save_state(chat_id, Step.ASK_LOCATION, {})
+    _save_state(chat_id, Step.ASK_LANGUAGE, {})
+
+
+def handle_ask_language(chat_id: str, callback_query: dict) -> None:
+    """Receive language selection from inline keyboard, transition to ASK_LOCATION."""
+    answer_callback_query(callback_query["id"])
+    lang_data = callback_query.get("data", "lang_en")
+    lang = "es" if lang_data == "lang_es" else "en"
+
+    data = {"language": lang}
+    _save_state(chat_id, Step.ASK_LOCATION, data)
+
+    send_message(chat_id, t('ask_location', lang))
 
 
 def handle_ask_location(chat_id: str, update: dict) -> None:
     """Expect a location message. Extract lat/lon and ask for event name."""
     msg = update.get("message", {})
     location = msg.get("location")
+    _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
 
     if not location:
-        send_message(
-            chat_id,
-            "I need a location pin 📍\n\n"
-            "Tap the 📎 paperclip → Location, then drop a pin on the map.",
-        )
+        send_message(chat_id, t('location_missing', lang))
         return
 
     lat = location["latitude"]
     lon = location["longitude"]
-    _, data = _load_state(chat_id)
     data.update({"lat": lat, "lon": lon})
     _save_state(chat_id, Step.ASK_NAME, data)
 
     send_message(
         chat_id,
-        f"📍 Got it — <b>{lat:.4f}, {lon:.4f}</b>\n\n"
-        "What should I call this event?\n"
-        "<i>e.g. Ana & Juan's Wedding, Harvest Day, Wind Farm Inspection</i>",
+        t('location_received', lang).format(lat=f"{lat:.4f}", lon=f"{lon:.4f}"),
     )
 
 
@@ -526,20 +736,19 @@ def handle_ask_name(chat_id: str, update: dict) -> None:
     """Expect free text event name."""
     msg = update.get("message", {})
     text = (msg.get("text") or "").strip()
+    _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
 
     if not text:
-        send_message(chat_id, "Please send the event name as a text message.")
+        send_message(chat_id, t('ask_name_missing', lang))
         return
 
-    _, data = _load_state(chat_id)
     data["name"] = text
     _save_state(chat_id, Step.ASK_DATE, data)
 
     send_message(
         chat_id,
-        f"Great — <b>{_escape(text)}</b> ✓\n\n"
-        "What date is the event?\n"
-        "<i>e.g. September 15, 2026 / 2026-09-15 / 15/09/2026</i>",
+        t('name_confirmed', lang).format(name=_escape(text)),
     )
 
 
@@ -547,9 +756,11 @@ def handle_ask_date(chat_id: str, update: dict) -> None:
     """Parse natural date input using dateparser."""
     msg = update.get("message", {})
     text = (msg.get("text") or "").strip()
+    _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
 
     if not text:
-        send_message(chat_id, "Please send the event date as a text message.")
+        send_message(chat_id, t('ask_date_missing', lang))
         return
 
     # dateparser with future-dates preferred, UTC output
@@ -564,34 +775,20 @@ def handle_ask_date(chat_id: str, update: dict) -> None:
     )
 
     if parsed is None:
-        send_message(
-            chat_id,
-            "I couldn't understand that date 🤔\n\n"
-            "Please try a format like:\n"
-            "• <b>September 15, 2026</b>\n"
-            "• <b>2026-09-15</b>\n"
-            "• <b>15/09/2026</b>",
-        )
+        send_message(chat_id, t('date_unparseable', lang))
         return
 
     if parsed <= datetime.now(timezone.utc):
-        send_message(
-            chat_id,
-            "That date is in the past. Please send a future event date.",
-        )
+        send_message(chat_id, t('date_in_past', lang))
         return
 
-    _, data = _load_state(chat_id)
     # Store date only — time collected next
     data["event_date"] = parsed.strftime("%Y-%m-%d")
     _save_state(chat_id, Step.ASK_TIME, data)
 
     send_message(
         chat_id,
-        f"📅 <b>{parsed.strftime('%B %d, %Y')}</b> ✓\n\n"
-        "What time does the event start? <i>(UTC)</i>\n"
-        "<i>e.g. 17:00 / 5pm / 14:30</i>\n\n"
-        "All times are in UTC. Montevideo is UTC-3, so 5pm local = 20:00 UTC.",
+        t('date_confirmed', lang).format(date=parsed.strftime('%B %d, %Y')),
     )
 
 
@@ -599,12 +796,13 @@ def handle_ask_time(chat_id: str, update: dict) -> None:
     """Parse time input and combine with previously stored date."""
     msg = update.get("message", {})
     text = (msg.get("text") or "").strip()
+    _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
 
     if not text:
-        send_message(chat_id, "Please send the event time as a text message.")
+        send_message(chat_id, t('ask_time_missing', lang))
         return
 
-    _, data = _load_state(chat_id)
     date_str = data.get("event_date", "")
 
     # Parse time by prepending the known date so dateparser has full context
@@ -618,14 +816,7 @@ def handle_ask_time(chat_id: str, update: dict) -> None:
     )
 
     if parsed is None:
-        send_message(
-            chat_id,
-            "I couldn't understand that time 🤔\n\n"
-            "Please try a format like:\n"
-            "• <b>17:00</b>\n"
-            "• <b>5pm</b>\n"
-            "• <b>14:30</b>",
-        )
+        send_message(chat_id, t('time_unparseable', lang))
         return
 
     data["event_datetime"] = parsed.isoformat()
@@ -633,8 +824,7 @@ def handle_ask_time(chat_id: str, update: dict) -> None:
 
     send_message(
         chat_id,
-        f"⏰ <b>{parsed.strftime('%H:%M UTC')}</b> ✓\n\n"
-        "What type of event is this?",
+        t('time_confirmed', lang).format(time=parsed.strftime('%H:%M UTC')),
         reply_markup=_inline_keyboard([
             ("💒 Social event (wedding, party, concert)", "social_event"),
             ("🌾 Agriculture (harvest, planting, livestock)", "agriculture"),
@@ -650,6 +840,7 @@ def handle_ask_context(chat_id: str, callback_query: dict) -> None:
     context = callback_query.get("data", "social_event")
 
     _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
     data["context"] = context
     _save_state(chat_id, Step.ASK_DURATION, data)
 
@@ -663,7 +854,7 @@ def handle_ask_context(chat_id: str, callback_query: dict) -> None:
     send_message(
         chat_id,
         f"{context_labels.get(context, context)} ✓\n\n"
-        "How long does the event last?",
+        + t('ask_duration', lang),
         reply_markup=_inline_keyboard([
             ("2 hours",  "2"),
             ("4 hours",  "4"),
@@ -680,21 +871,23 @@ def handle_ask_duration(chat_id: str, callback_query: dict) -> None:
     duration = callback_query.get("data", "4")
 
     _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
     data["duration_hours"] = int(duration)
     _save_state(chat_id, Step.CONFIRM, data)
 
     event_dt = datetime.fromisoformat(data["event_datetime"])
 
     summary = (
-        f"<b>Please confirm your event:</b>\n\n"
-        f"📍 <b>Name:</b> {_escape(data.get('name', ''))}\n"
-        f"🗺 <b>Location:</b> {data.get('lat', 0):.4f}, {data.get('lon', 0):.4f}\n"
-        f"📅 <b>Date:</b> {event_dt.strftime('%B %d, %Y %H:%M UTC')}\n"
-        f"⏱ <b>Duration:</b> {duration} hours\n"
-        f"🏷 <b>Context:</b> {data.get('context', 'social_event')}\n\n"
-        f"Skygent will check the forecast every "
-        f"<b>{data.get('check_interval_hours', 6)}h</b> and alert you "
-        f"when conditions change significantly."
+        t('confirm_header', lang) + "\n\n"
+        + t('confirm_body', lang).format(
+            name=_escape(data.get('name', '')),
+            lat=f"{data.get('lat', 0):.4f}",
+            lon=f"{data.get('lon', 0):.4f}",
+            date=event_dt.strftime('%B %d, %Y %H:%M UTC'),
+            duration=duration,
+            context=data.get('context', 'social_event'),
+            interval=data.get('check_interval_hours', 6),
+        )
     )
 
     send_message(
@@ -752,27 +945,21 @@ def handle_confirm(chat_id: str, callback_query: dict) -> None:
     answer_callback_query(callback_query["id"])
     choice = callback_query.get("data", "confirm_no")
 
+    _, data = _load_state(chat_id)
+    lang = data.get('language', 'en')
+
     if choice == "confirm_no":
         _clear_state(chat_id)
-        send_message(
-            chat_id,
-            "Registration cancelled. Send /start whenever you're ready to try again.",
-        )
+        send_message(chat_id, t('cancelled', lang))
         return
 
     # Register the profile
-    _, data = _load_state(chat_id)
-
-    send_message(chat_id, "⏳ Registering your event and fetching the first forecast...")
+    send_message(chat_id, t('registering', lang))
 
     profile_json = _register_profile_via_api(data, chat_id)
 
     if profile_json is None:
-        send_message(
-            chat_id,
-            "❌ Something went wrong registering your event. "
-            "Please try again or contact support.",
-        )
+        send_message(chat_id, t('registration_failed', lang))
         return
 
     # The API creates the profile without telegram_chat_id (the field is
@@ -794,6 +981,7 @@ def handle_confirm(chat_id: str, callback_query: dict) -> None:
             event_duration_hours=profile_json["event_duration_hours"],
             context=profile_json["context"],
             telegram_chat_id=chat_id,
+            language=data.get('language', 'en'),
         )
 
         import asyncio
@@ -808,14 +996,12 @@ def handle_confirm(chat_id: str, callback_query: dict) -> None:
             # Send a friendly explanation instead of attempting a doomed fetch.
             send_message(
                 chat_id,
-                f"✅ <b>{_escape(profile.name)}</b> is now being monitored!\n\n"
-                f"📅 Your event is <b>{horizon_days:.0f} days away</b> — "
-                f"weather forecasts are only available up to 16 days out, "
-                f"so I don't have data yet.\n\n"
-                f"I'll check every <b>{profile.check_interval_hours}h</b> "
-                f"and send you the first forecast as soon as it becomes available "
-                f"(roughly {max(0, horizon_days - 16):.0f} days from now). "
-                f"I'll also alert you whenever the forecast changes significantly.",
+                t('beyond_forecast_window', lang).format(
+                    name=_escape(profile.name),
+                    days=horizon_days,
+                    interval=profile.check_interval_hours,
+                    wait=max(0, horizon_days - 16),
+                ),
             )
         else:
             # Event is within forecast window — fetch and narrate
@@ -828,8 +1014,73 @@ def handle_confirm(chat_id: str, callback_query: dict) -> None:
         logger.error("bot: welcome forecast failed: %s", exc)
         send_message(
             chat_id,
-            f"✅ <b>{_escape(profile_json['name'])}</b> is now being monitored!\n\n"
-            "I'll send you updates when the forecast changes significantly.",
+            t('welcome_fallback', lang).format(name=_escape(profile_json['name'])),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Forecast Q&A command
+# ---------------------------------------------------------------------------
+
+def handle_forecast_query(chat_id: str, update: dict) -> None:
+    """
+    Handle /forecast — answer a forecast Q&A grounded in current snapshot
+    and last 10 poll runs. Picks the profile with the soonest event_datetime
+    for this chat. Uses llm.invoke (sync) since the bot is synchronous.
+    """
+    _, state_data = _load_state(chat_id)
+    lang = state_data.get('language', 'en')
+
+    with get_session_sync() as session:
+        profiles = get_profiles_by_chat_id(session, chat_id)
+
+    if not profiles:
+        send_message(chat_id, t('no_active_events', lang))
+        return
+
+    # Pick the profile with the soonest event_datetime
+    profile = min(profiles, key=lambda p: p.event_datetime)
+
+    with get_session_sync() as session:
+        snapshot = load_latest_snapshot(session, profile.id)
+        poll_runs = get_recent_poll_runs(session, limit=10, profile_id=profile.id)
+
+    payload = {
+        'profile': {
+            'name': profile.name,
+            'event_datetime': profile.event_datetime.isoformat(),
+            'context': profile.context,
+            'language': profile.language,
+        },
+        'current_snapshot': {
+            'data': snapshot.data if snapshot else None,
+            'horizon_days': round(snapshot.horizon_days, 1) if snapshot else None,
+            'fetched_at': snapshot.fetched_at.isoformat() if snapshot else None,
+        },
+        'poll_history': [
+            {
+                'ran_at': r.ran_at.isoformat(),
+                'status': r.status,
+                'changes_detected': r.changes_detected,
+                'alert_sent': r.alert_sent,
+            }
+            for r in poll_runs
+        ],
+    }
+
+    try:
+        llm = _get_llm()
+        messages = [
+            SystemMessage(content=QA_SYSTEM_PROMPT),
+            HumanMessage(content=json.dumps(payload, default=str)),
+        ]
+        response = llm.invoke(messages)
+        send_message(chat_id, response.content.strip())
+    except Exception as exc:
+        logger.error("bot: forecast Q&A LLM error: %s", exc)
+        send_message(
+            chat_id,
+            "Sorry, I couldn't retrieve forecast information right now. Please try again later.",
         )
 
 
@@ -860,7 +1111,9 @@ def dispatch(update: dict) -> None:
             send_message(chat_id, "Cancelled. Send /start to begin again.")
             return
 
-        if step == Step.ASK_CONTEXT:
+        if step == Step.ASK_LANGUAGE:
+            handle_ask_language(chat_id, cq)
+        elif step == Step.ASK_CONTEXT:
             handle_ask_context(chat_id, cq)
         elif step == Step.ASK_DURATION:
             handle_ask_duration(chat_id, cq)
@@ -880,8 +1133,10 @@ def dispatch(update: dict) -> None:
 
     # /cancel command at any step
     if text == "/cancel":
+        _, data = _load_state(chat_id)
+        lang = data.get('language', 'en')
         _clear_state(chat_id)
-        send_message(chat_id, "Cancelled. Send /start to begin again.")
+        send_message(chat_id, t('cancel_any', lang))
         return
 
     step, _ = _load_state(chat_id)
@@ -892,8 +1147,18 @@ def dispatch(update: dict) -> None:
         handle_idle(chat_id, update)
         return
 
+    # /forecast command — answer forecast Q&A for this user
+    if text == "/forecast":
+        handle_forecast_query(chat_id, update)
+        return
+
     if step == Step.IDLE:
         handle_idle(chat_id, update)
+    elif step == Step.ASK_LANGUAGE:
+        # Text received during ASK_LANGUAGE — nudge user to press a button
+        _, data = _load_state(chat_id)
+        lang = data.get('language', 'en')
+        send_message(chat_id, t('use_buttons', lang))
     elif step == Step.ASK_LOCATION:
         handle_ask_location(chat_id, update)
     elif step == Step.ASK_NAME:
@@ -904,7 +1169,6 @@ def dispatch(update: dict) -> None:
         handle_ask_time(chat_id, update)
     else:
         # Unexpected text during a keyboard-input step
-        send_message(
-            chat_id,
-            "Please use the buttons above to continue, or send /cancel to start over.",
-        )
+        _, data = _load_state(chat_id)
+        lang = data.get('language', 'en')
+        send_message(chat_id, t('use_buttons', lang))
