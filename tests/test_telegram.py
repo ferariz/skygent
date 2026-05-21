@@ -360,6 +360,151 @@ class TestNotifyNodeTelegram:
 
 
 # ---------------------------------------------------------------------------
+# TestHandleForecastQuery — /forecast command (LLM mocked)
+# ---------------------------------------------------------------------------
+
+class TestHandleForecastQuery:
+    """
+    Tests for handle_forecast_query. The LLM is always mocked to satisfy
+    the architecture invariant: no LLM calls in the test suite.
+    """
+
+    def _make_profile(self, chat_id="chat_123", **overrides) -> MonitoringProfile:
+        defaults = dict(
+            name="Test Event",
+            location=(-34.9011, -56.1645),
+            event_datetime=datetime.now(timezone.utc) + timedelta(days=10),
+            monitoring_start=datetime.now(timezone.utc),
+            telegram_chat_id=chat_id,
+        )
+        defaults.update(overrides)
+        return MonitoringProfile(**defaults)
+
+    def _make_snapshot(self, profile_id: str) -> ForecastSnapshot:
+        return ForecastSnapshot(
+            profile_id=profile_id,
+            target_datetime=datetime.now(timezone.utc) + timedelta(days=10),
+            data={"precipitation_probability_max": 20.0, "temperature_2m_max": 25.0},
+            horizon_days=10.0,
+        )
+
+    def test_no_profiles_sends_no_active_events_message(self):
+        from skygent.integrations.telegram_bot import handle_forecast_query
+
+        with patch("skygent.integrations.telegram_bot._load_state", return_value=("IDLE", {})), \
+             patch("skygent.integrations.telegram_bot.get_profiles_by_chat_id", return_value=[]), \
+             patch("skygent.integrations.telegram_bot.get_session_sync") as mock_session, \
+             patch("skygent.integrations.telegram_bot.send_message") as mock_send:
+            # Make get_session_sync a context manager
+            mock_session.return_value.__enter__ = lambda s: MagicMock()
+            mock_session.return_value.__exit__ = MagicMock(return_value=False)
+
+            handle_forecast_query("chat_123", {})
+
+        mock_send.assert_called_once()
+        args = mock_send.call_args[0]
+        assert "chat_123" == args[0]
+        # Message should contain something about no events (English)
+        assert "no active" in args[1].lower() or "No " in args[1]
+
+    def test_with_profile_calls_llm_and_sends_response(self):
+        from skygent.integrations.telegram_bot import handle_forecast_query
+        from unittest.mock import MagicMock, patch
+
+        profile = self._make_profile()
+        snapshot = self._make_snapshot(profile.id)
+
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "The weather looks good for your event."
+
+        with patch("skygent.integrations.telegram_bot._load_state", return_value=("IDLE", {"language": "en"})), \
+             patch("skygent.integrations.telegram_bot.get_profiles_by_chat_id", return_value=[profile]), \
+             patch("skygent.integrations.telegram_bot.load_latest_snapshot", return_value=snapshot), \
+             patch("skygent.integrations.telegram_bot.get_recent_poll_runs", return_value=[]), \
+             patch("skygent.integrations.telegram_bot.get_session_sync") as mock_session, \
+             patch("skygent.integrations.telegram_bot._get_llm") as mock_get_llm, \
+             patch("skygent.integrations.telegram_bot.send_message") as mock_send:
+            mock_session.return_value.__enter__ = lambda s: MagicMock()
+            mock_session.return_value.__exit__ = MagicMock(return_value=False)
+            mock_llm = MagicMock()
+            mock_llm.invoke.return_value = mock_llm_response
+            mock_get_llm.return_value = mock_llm
+
+            handle_forecast_query("chat_123", {})
+
+        mock_llm.invoke.assert_called_once()
+        mock_send.assert_called_once()
+        sent_text = mock_send.call_args[0][1]
+        assert "weather looks good" in sent_text
+
+    def test_llm_error_sends_fallback_message(self):
+        from skygent.integrations.telegram_bot import handle_forecast_query
+
+        profile = self._make_profile()
+        snapshot = self._make_snapshot(profile.id)
+
+        with patch("skygent.integrations.telegram_bot._load_state", return_value=("IDLE", {})), \
+             patch("skygent.integrations.telegram_bot.get_profiles_by_chat_id", return_value=[profile]), \
+             patch("skygent.integrations.telegram_bot.load_latest_snapshot", return_value=snapshot), \
+             patch("skygent.integrations.telegram_bot.get_recent_poll_runs", return_value=[]), \
+             patch("skygent.integrations.telegram_bot.get_session_sync") as mock_session, \
+             patch("skygent.integrations.telegram_bot._get_llm") as mock_get_llm, \
+             patch("skygent.integrations.telegram_bot.send_message") as mock_send:
+            mock_session.return_value.__enter__ = lambda s: MagicMock()
+            mock_session.return_value.__exit__ = MagicMock(return_value=False)
+            mock_llm = MagicMock()
+            mock_llm.invoke.side_effect = Exception("LLM unavailable")
+            mock_get_llm.return_value = mock_llm
+
+            handle_forecast_query("chat_123", {})
+
+        mock_send.assert_called_once()
+        sent_text = mock_send.call_args[0][1]
+        # Fallback message should mention inability to retrieve info
+        assert len(sent_text) > 0
+
+    def test_picks_soonest_event_when_multiple_profiles(self):
+        from skygent.integrations.telegram_bot import handle_forecast_query
+
+        p_later = self._make_profile(
+            name="Later Event",
+            event_datetime=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+        p_sooner = self._make_profile(
+            name="Sooner Event",
+            event_datetime=datetime.now(timezone.utc) + timedelta(days=5),
+        )
+
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "Forecast info."
+        captured_payload = {}
+
+        def capture_invoke(messages):
+            import json
+            # The user message contains the payload JSON
+            user_msg_content = messages[1].content
+            captured_payload.update(json.loads(user_msg_content))
+            return mock_llm_response
+
+        with patch("skygent.integrations.telegram_bot._load_state", return_value=("IDLE", {})), \
+             patch("skygent.integrations.telegram_bot.get_profiles_by_chat_id", return_value=[p_later, p_sooner]), \
+             patch("skygent.integrations.telegram_bot.load_latest_snapshot", return_value=None), \
+             patch("skygent.integrations.telegram_bot.get_recent_poll_runs", return_value=[]), \
+             patch("skygent.integrations.telegram_bot.get_session_sync") as mock_session, \
+             patch("skygent.integrations.telegram_bot._get_llm") as mock_get_llm, \
+             patch("skygent.integrations.telegram_bot.send_message"):
+            mock_session.return_value.__enter__ = lambda s: MagicMock()
+            mock_session.return_value.__exit__ = MagicMock(return_value=False)
+            mock_llm = MagicMock()
+            mock_llm.invoke.side_effect = capture_invoke
+            mock_get_llm.return_value = mock_llm
+
+            handle_forecast_query("chat_123", {})
+
+        assert captured_payload["profile"]["name"] == "Sooner Event"
+
+
+# ---------------------------------------------------------------------------
 # TestTelegramIntegration — real delivery (gated)
 # ---------------------------------------------------------------------------
 

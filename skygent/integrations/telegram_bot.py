@@ -116,7 +116,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from skygent.api.database import (
     clear_conversation_state,
     get_conversation_state,
+    get_profiles_by_chat_id,
+    get_recent_poll_runs,
     get_session_sync,
+    load_latest_snapshot,
     save_conversation_state,
 )
 from skygent.core.models import MonitoringProfile, ForecastSnapshot
@@ -1021,13 +1024,10 @@ def handle_confirm(chat_id: str, callback_query: dict) -> None:
 
 def handle_forecast_query(chat_id: str, update: dict) -> None:
     """
-    Handle /forecast — answer a forecast Q&A grounded in poll history.
-    Implemented in Step 7; placeholder raises to avoid silent failure.
+    Handle /forecast — answer a forecast Q&A grounded in current snapshot
+    and last 10 poll runs. Picks the profile with the soonest event_datetime
+    for this chat. Uses llm.invoke (sync) since the bot is synchronous.
     """
-    # Implemented fully in Step 7 (feat(bot): /forecast Q&A command)
-    from skygent.api.database import get_profiles_by_chat_id, get_session_sync
-    from skygent.api.database import DBSnapshotStore, get_recent_poll_runs
-
     _, state_data = _load_state(chat_id)
     lang = state_data.get('language', 'en')
 
@@ -1042,7 +1042,7 @@ def handle_forecast_query(chat_id: str, update: dict) -> None:
     profile = min(profiles, key=lambda p: p.event_datetime)
 
     with get_session_sync() as session:
-        snapshot = DBSnapshotStore.get(session, profile.id)
+        snapshot = load_latest_snapshot(session, profile.id)
         poll_runs = get_recent_poll_runs(session, limit=10, profile_id=profile.id)
 
     payload = {
