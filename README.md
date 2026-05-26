@@ -1,5 +1,23 @@
 # Skygent — Decision Engine for Weather Change Detection
 
+![Tests](https://img.shields.io/badge/tests-216%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![Railway](https://img.shields.io/badge/railway-live-success)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Version](https://img.shields.io/badge/version-v0.4.1-informational)
+
+---
+
+## Try it
+
+Skygent is live in production.
+
+- **API**: https://skygent-production.up.railway.app/docs
+- **Telegram bot**: search [@SkygentBot](https://t.me/SkygentBot) on Telegram
+- **Source**: https://github.com/ferariz/skygent
+
+---
+
 Skygent is a deterministic decision engine for detecting meaningful changes in numerical weather prediction systems.
 
 It is based on a simple principle:
